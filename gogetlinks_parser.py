@@ -49,6 +49,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 # =============================================================================
 
 # URLs
+HOME_URL = "https://gogetlinks.net"
 LOGIN_URL = "https://gogetlinks.net/user/signIn"
 TASK_LIST_URL = "https://gogetlinks.net/webTask/index"
 TASK_DETAIL_URL = "https://gogetlinks.net/template/view_task.php?curr_id={}"
@@ -72,9 +73,10 @@ EXIT_UNEXPECTED = 99
 # CSS Selectors
 SELECTOR_TASK_ROWS = "tr[id^='col_row_']"
 SELECTOR_CAPTCHA = "[data-sitekey]"
-SELECTOR_LOGIN_EMAIL = "input[name='e_mail']"
-SELECTOR_LOGIN_PASSWORD = "input[name='password']"
-SELECTOR_LOGIN_SUBMIT = "input[type='submit']"
+SELECTOR_LOGIN_BUTTON = "a[href='/user/signIn'][rel='modal:open']"
+SELECTOR_LOGIN_EMAIL = "input.js-email[name='e_mail']"
+SELECTOR_LOGIN_PASSWORD = "input.js-password[name='password']"
+SELECTOR_LOGIN_SUBMIT = "button.js-send-sign-in[type='submit']"
 SELECTOR_PROFILE_LINK = "a[href='/profile']"
 
 # Anti-Captcha API
@@ -591,14 +593,31 @@ def authenticate(
     logger.info(f"Authenticating as {mask_email(credentials['username'])}")
 
     try:
-        # Navigate to login page
-        logger.debug(f"Navigating to {LOGIN_URL}")
-        driver.get(LOGIN_URL)
+        # Navigate to home page first
+        logger.debug(f"Navigating to {HOME_URL}")
+        driver.get(HOME_URL)
+
+        # Wait for page to fully load
+        time.sleep(2)
 
         # Check if already authenticated
         if is_authenticated(driver):
             logger.info("Already authenticated")
             return True
+
+        # Click on "Войти" link to open login modal
+        logger.debug(f"Looking for login button: {SELECTOR_LOGIN_BUTTON}")
+        wait = WebDriverWait(driver, PAGE_LOAD_TIMEOUT)
+
+        login_button = wait.until(
+            EC.element_to_be_clickable((By.CSS_SELECTOR, SELECTOR_LOGIN_BUTTON))
+        )
+        logger.debug("Login button found, clicking to open modal")
+        login_button.click()
+
+        # Wait for modal to appear and form fields to be visible
+        logger.debug("Waiting for login modal to appear")
+        time.sleep(2)
 
         # Extract captcha sitekey (optional - may not be present)
         sitekey = extract_captcha_sitekey(driver, logger)
@@ -620,14 +639,23 @@ def authenticate(
         else:
             logger.info("No captcha detected on login page")
 
-        # Fill login form
-        logger.debug("Filling login form")
+        # Fill login form in modal
+        logger.debug("Filling login form in modal")
 
-        email_field = driver.find_element(By.CSS_SELECTOR, SELECTOR_LOGIN_EMAIL)
+        logger.debug(f"Waiting for email field: {SELECTOR_LOGIN_EMAIL}")
+        email_field = wait.until(
+            EC.element_to_be_clickable((By.CSS_SELECTOR, SELECTOR_LOGIN_EMAIL))
+        )
+        logger.debug("Email field found, filling...")
         email_field.clear()
         email_field.send_keys(credentials["username"])
 
-        password_field = driver.find_element(By.CSS_SELECTOR, SELECTOR_LOGIN_PASSWORD)
+        # Wait for password field
+        logger.debug(f"Waiting for password field: {SELECTOR_LOGIN_PASSWORD}")
+        password_field = wait.until(
+            EC.element_to_be_clickable((By.CSS_SELECTOR, SELECTOR_LOGIN_PASSWORD))
+        )
+        logger.debug("Password field found, filling...")
         password_field.clear()
         password_field.send_keys(credentials["password"])
 
@@ -638,10 +666,27 @@ def authenticate(
                 f"document.getElementById('g-recaptcha-response').innerHTML = '{captcha_token}';"
             )
 
-        # Submit form
-        logger.debug("Submitting login form")
-        submit_button = driver.find_element(By.CSS_SELECTOR, SELECTOR_LOGIN_SUBMIT)
-        submit_button.click()
+        # Submit form - find button (it may be disabled initially)
+        logger.debug(f"Waiting for submit button: {SELECTOR_LOGIN_SUBMIT}")
+        submit_button = wait.until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, SELECTOR_LOGIN_SUBMIT))
+        )
+        logger.debug("Submit button found")
+
+        # Remove disabled attribute if present
+        logger.debug("Enabling submit button")
+        driver.execute_script("arguments[0].removeAttribute('disabled');", submit_button)
+
+        # Scroll to button to ensure it's in viewport
+        logger.debug("Scrolling to submit button")
+        driver.execute_script("arguments[0].scrollIntoView(true);", submit_button)
+        time.sleep(0.5)
+
+        # Submit using JavaScript (more reliable than click)
+        logger.debug("Submitting form via JavaScript")
+        driver.execute_script("arguments[0].click();", submit_button)
+
+        logger.debug("Form submitted successfully")
 
         # Wait for page load and verify authentication
         time.sleep(3)
@@ -653,8 +698,18 @@ def authenticate(
             logger.error("Authentication failed - credentials may be incorrect")
             return False
 
-    except (NoSuchElementException, TimeoutException, WebDriverException) as e:
-        logger.error(f"Authentication error: {e}")
+    except TimeoutException as e:
+        logger.error(f"Timeout waiting for element during authentication: {e}")
+        logger.debug("Page source length: %d", len(driver.page_source))
+        return False
+    except NoSuchElementException as e:
+        logger.error(f"Element not found during authentication: {e}")
+        return False
+    except WebDriverException as e:
+        logger.error(f"WebDriver error during authentication: {e}")
+        return False
+    except Exception as e:
+        logger.error(f"Unexpected authentication error: {type(e).__name__}: {e}")
         return False
 
 
