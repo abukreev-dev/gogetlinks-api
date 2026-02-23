@@ -849,12 +849,21 @@ def parse_task_row(row: WebElement, logger: logging.Logger) -> Optional[Dict[str
             logger.warning(f"Task {task_id}: Expected 6+ cells, found {len(cells)}")
             return None
 
-        # Cell 0: Domain
+        # Cell 0: Domain + task type (e.g. "stroimdacha.ru\nЗаметка")
         try:
             domain_link = cells[0].find_element(By.TAG_NAME, "a")
             domain = sanitize_text(domain_link.text)
         except NoSuchElementException:
             domain = sanitize_text(cells[0].text)
+
+        # Extract task type from campaign div under domain
+        try:
+            campaign_div = cells[0].find_element(
+                By.CSS_SELECTOR, ".site-link__campaign"
+            )
+            title = sanitize_text(campaign_div.text)
+        except NoSuchElementException:
+            title = ""
 
         # Cell 1: Customer + customer_url
         try:
@@ -871,13 +880,6 @@ def parse_task_row(row: WebElement, logger: logging.Logger) -> Optional[Dict[str
             external_links = int(external_links_text) if external_links_text else 0
         except ValueError:
             external_links = 0
-
-        # Cell 3: Title
-        try:
-            title_link = cells[3].find_element(By.TAG_NAME, "a")
-            title = sanitize_text(title_link.text)
-        except NoSuchElementException:
-            title = sanitize_text(cells[3].text)
 
         # Cell 4: Time passed
         time_passed = sanitize_text(cells[4].text)
@@ -911,8 +913,12 @@ def parse_task_details(
     """Parse task details from AJAX modal.
 
     Opens the detail modal for a task via JavaScript, extracts additional
-    fields (description, url, requirements, contacts, deadline), then
-    closes the modal.
+    fields from the modal's .tv_params_block structure:
+    - description: "Текст задания" + "Комментарий оптимизатора"
+    - url: from #copy_url input or .param.link_to a
+    - requirements: "Требования к странице" block params
+    - contacts: not present in current modal format
+    - deadline: not present in current modal format
 
     Args:
         driver: Chrome WebDriver
@@ -931,93 +937,118 @@ def parse_task_details(
     }
 
     try:
-        # Open detail modal via direct URL in JavaScript
         detail_url = TASK_DETAIL_URL.format(task_id)
         logger.debug(f"Opening detail modal for task {task_id}: {detail_url}")
 
-        # Use jQuery modal if available, otherwise fetch via JS
+        # Remove any leftover modals from previous iterations
+        driver.execute_script(
+            "$('.jquery-modal').remove(); $('.modal').remove();"
+        )
+        time.sleep(0.3)
+
         driver.execute_script(
             f"$.get('{detail_url}', function(data) {{"
             f"  $('<div>').html(data).appendTo('body').modal();"
             f"}});"
         )
 
-        # Wait for modal to appear
         wait = WebDriverWait(driver, PAGE_LOAD_TIMEOUT)
         wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, SELECTOR_MODAL)))
-
-        # Small delay for content to render
         time.sleep(0.5)
 
-        # Get modal content
         modal = driver.find_element(By.CSS_SELECTOR, SELECTOR_MODAL_CONTENT)
-        modal_html = modal.get_attribute("innerHTML") or ""
 
-        # Parse fields from modal content
-        # Description: typically in a div or paragraph
+        # Extract URL from hidden #copy_url input
         try:
-            desc_elements = modal.find_elements(By.CSS_SELECTOR, "p, .description, .task-description")
-            if len(desc_elements) > 0:
-                description_parts = []
-                for elem in desc_elements:
-                    text = sanitize_text(elem.text)
-                    if len(text) > 0:
-                        description_parts.append(text)
-                if len(description_parts) > 0:
-                    details["description"] = "\n".join(description_parts)
+            copy_url_input = modal.find_element(By.CSS_SELECTOR, "#copy_url")
+            url_value = copy_url_input.get_attribute("value")
+            if url_value:
+                details["url"] = url_value.strip()
         except NoSuchElementException:
-            pass
-
-        # URL: look for links in modal
-        try:
-            url_elements = modal.find_elements(By.CSS_SELECTOR, "a[href*='http']")
-            for url_elem in url_elements:
-                href = url_elem.get_attribute("href") or ""
-                # Skip gogetlinks.net internal links
+            # Fallback: extract from .param.link_to a
+            try:
+                link_elem = modal.find_element(
+                    By.CSS_SELECTOR, ".param.link_to .block_value a"
+                )
+                href = link_elem.get_attribute("href") or ""
                 parsed = urlparse(href)
                 if parsed.netloc and "gogetlinks.net" not in parsed.netloc:
                     details["url"] = href
-                    break
-        except NoSuchElementException:
-            pass
+            except NoSuchElementException:
+                pass
 
-        # Try to extract structured data from table rows or dt/dd pairs
-        try:
-            rows = modal.find_elements(By.CSS_SELECTOR, "tr, .field-row")
-            for row in rows:
-                row_text = row.text.lower()
-                row_content = sanitize_text(row.text)
+        # Extract structured data from .tv_params_block sections
+        blocks = modal.find_elements(By.CSS_SELECTOR, ".tv_params_block")
+        description_parts = []
 
-                if "требовани" in row_text or "requirement" in row_text:
-                    # Get value part (after label)
-                    parts = row_content.split(":", 1)
-                    if len(parts) > 1:
-                        details["requirements"] = parts[1].strip()
+        for block in blocks:
+            try:
+                title_elem = block.find_element(By.CSS_SELECTOR, ".block_title")
+                block_title = sanitize_text(title_elem.text).lower()
+            except NoSuchElementException:
+                continue
 
-                elif "контакт" in row_text or "contact" in row_text:
-                    parts = row_content.split(":", 1)
-                    if len(parts) > 1:
-                        details["contacts"] = parts[1].strip()
+            if "требовани" in block_title:
+                # Requirements block: collect all param name-value pairs
+                params = block.find_elements(By.CSS_SELECTOR, ".param")
+                req_parts = []
+                for param in params:
+                    try:
+                        name = sanitize_text(
+                            param.find_element(
+                                By.CSS_SELECTOR, ".block_name"
+                            ).text
+                        )
+                        value = sanitize_text(
+                            param.find_element(
+                                By.CSS_SELECTOR, ".block_value"
+                            ).text
+                        )
+                        if name and value:
+                            req_parts.append(f"{name}: {value}")
+                    except NoSuchElementException:
+                        continue
+                if len(req_parts) > 0:
+                    details["requirements"] = "; ".join(req_parts)
 
-                elif "срок" in row_text or "deadline" in row_text:
-                    parts = row_content.split(":", 1)
-                    if len(parts) > 1:
-                        details["deadline"] = parts[1].strip()
+            elif "текст задани" in block_title:
+                # Task description text
+                try:
+                    value_elem = block.find_element(
+                        By.CSS_SELECTOR, ".params .block_value"
+                    )
+                    text = sanitize_text(value_elem.text)
+                    if len(text) > 0:
+                        description_parts.append(text)
+                except NoSuchElementException:
+                    pass
 
-                elif "url" in row_text or "ссылк" in row_text:
-                    parts = row_content.split(":", 1)
-                    if len(parts) > 1:
-                        url_text = parts[1].strip()
-                        if url_text and details["url"] is None:
-                            details["url"] = url_text
-        except NoSuchElementException:
-            pass
+            elif "комментарий" in block_title:
+                # Optimizer's comment — append to description
+                try:
+                    value_elem = block.find_element(
+                        By.CSS_SELECTOR, ".params .block_value"
+                    )
+                    text = sanitize_text(value_elem.text)
+                    if len(text) > 0:
+                        description_parts.append(f"[Комментарий] {text}")
+                except NoSuchElementException:
+                    pass
 
-        # Fallback: extract all text as description if nothing found
-        if details["description"] is None:
-            full_text = sanitize_text(modal.text)
-            if len(full_text) > 10:
-                details["description"] = full_text
+            elif "ссылк" in block_title:
+                # Link block: extract anchor text
+                try:
+                    anchor_elem = block.find_element(
+                        By.CSS_SELECTOR, ".param.unchor .block_value"
+                    )
+                    anchor_text = sanitize_text(anchor_elem.text)
+                    if anchor_text and len(anchor_text) > 0:
+                        description_parts.append(f"[Анкор] {anchor_text}")
+                except NoSuchElementException:
+                    pass
+
+        if len(description_parts) > 0:
+            details["description"] = "\n".join(description_parts)
 
         logger.debug(
             f"Task {task_id} details: "
@@ -1043,7 +1074,6 @@ def parse_task_details(
                     btn.click()
                 except Exception:
                     pass
-            # Also try closing via JavaScript
             driver.execute_script("$.modal.close();")
         except Exception:
             pass

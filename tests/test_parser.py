@@ -101,27 +101,49 @@ class TestTaskDetailsParser:
 
     def test_parse_task_details_success(self, logger):
         """Тест парсинга деталей задачи из модалки."""
+        from selenium.common.exceptions import NoSuchElementException
+
         driver = Mock()
 
-        # Mock modal element
-        modal = Mock()
-        modal.get_attribute.return_value = "<div>Task details</div>"
-        modal.text = "Full task description text content here"
+        # Mock #copy_url input
+        copy_url_input = Mock()
+        copy_url_input.get_attribute.return_value = "http://example.com/page"
 
-        # Mock description elements
-        desc_elem = Mock()
-        desc_elem.text = "Task description paragraph"
-        modal.find_elements.return_value = [desc_elem]
+        # Mock block with title "Текст задания"
+        block_title = Mock()
+        block_title.text = "Текст задания"
+
+        block_value = Mock()
+        block_value.text = "Place link at top of article"
+
+        task_block = Mock()
+        task_block.find_element.side_effect = lambda by, sel: {
+            ".block_title": block_title,
+            ".params .block_value": block_value,
+        }.get(sel, Mock())
+        task_block.find_elements.return_value = []
+
+        # Mock modal
+        modal = Mock()
+
+        def modal_find_element(by, selector):
+            if selector == "#copy_url":
+                return copy_url_input
+            raise NoSuchElementException()
+
+        modal.find_element.side_effect = modal_find_element
+        modal.find_elements.return_value = [task_block]
 
         driver.find_element.return_value = modal
 
-        # Mock WebDriverWait
         with patch("gogetlinks_parser.WebDriverWait") as mock_wait:
             mock_wait.return_value.until.return_value = modal
 
             details = parse_task_details(driver, 123, logger)
 
+        assert details["url"] == "http://example.com/page"
         assert details["description"] is not None
+        assert "Place link at top of article" in details["description"]
 
     def test_parse_task_details_timeout(self, logger):
         """Тест таймаута при открытии модалки."""
