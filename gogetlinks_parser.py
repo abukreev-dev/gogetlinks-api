@@ -137,6 +137,7 @@ def load_config(config_path: str = "config.ini") -> Dict[str, Any]:
             "enabled": parser.getboolean("telegram", "enabled", fallback=False),
             "bot_token": parser.get("telegram", "bot_token", fallback=""),
             "chat_id": parser.get("telegram", "chat_id", fallback=""),
+            "mention": parser.get("telegram", "mention", fallback=""),
         },
         "output": {
             "print_to_console": parser.getboolean("output", "print_to_console"),
@@ -1198,11 +1199,14 @@ TELEGRAM_API_URL = "https://api.telegram.org/bot{}/sendMessage"
 TELEGRAM_MAX_MESSAGE_LENGTH = 4096
 
 
-def format_telegram_message(tasks: List[Dict[str, Any]]) -> str:
+def format_telegram_message(
+    tasks: List[Dict[str, Any]], mention: str = ""
+) -> str:
     """Format list of new tasks as Telegram HTML message.
 
     Args:
         tasks: List of new task dictionaries
+        mention: Telegram usernames to mention (e.g. "@user1 @user2")
 
     Returns:
         HTML-formatted message string
@@ -1222,11 +1226,16 @@ def format_telegram_message(tasks: List[Dict[str, Any]]) -> str:
     lines.append("")
     lines.append('<a href="https://gogetlinks.net/webTask">Открыть задачи</a>')
 
+    if mention:
+        lines.append(mention)
+
     message = "\n".join(lines)
 
     # Truncate if too long
     if len(message) > TELEGRAM_MAX_MESSAGE_LENGTH:
         footer = '\n\n<a href="https://gogetlinks.net/webTask">Открыть задачи</a>'
+        if mention:
+            footer += f"\n{mention}"
         message = message[: TELEGRAM_MAX_MESSAGE_LENGTH - len(footer) - 20]
         message += "\n<i>...обрезано</i>" + footer
 
@@ -1265,7 +1274,8 @@ def send_telegram_notification(
         logger.debug("No new tasks to notify about")
         return False
 
-    message = format_telegram_message(tasks)
+    mention = telegram_config.get("mention", "")
+    message = format_telegram_message(tasks, mention)
     url = TELEGRAM_API_URL.format(bot_token)
 
     payload = {

@@ -27,6 +27,8 @@ password = your_db_password
 enabled = false
 bot_token = 123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
 chat_id = -100123456789
+# Кого тегать в уведомлениях (через пробел, например: @user1 @user2)
+mention =
 
 [output]
 # Выводить задачи в консоль (true для тестирования, false для cron)
