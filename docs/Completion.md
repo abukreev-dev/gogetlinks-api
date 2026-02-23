@@ -65,8 +65,8 @@ mysql -u gogetlinks_parser -p gogetlinks < schema.sql
 ```bash
 # Clone repository
 cd ~
-git clone https://github.com/YOUR_USERNAME/gogetlinks-parser.git
-cd gogetlinks-parser
+git clone https://github.com/abukreev-dev/gogetlinks-api.git
+cd gogetlinks-api
 
 # Create virtual environment
 python3 -m venv venv
@@ -105,11 +105,16 @@ user = gogetlinks_parser
 password = STRONG_PASSWORD
 
 [output]
-print_tasks = false
+print_to_console = false
 
 [logging]
-level = INFO
-file = /home/user/gogetlinks-parser/gogetlinks_parser.log
+log_level = INFO
+log_file = logs/gogetlinks_parser.log
+
+[telegram]
+bot_token = your_bot_token
+chat_id = your_chat_id
+mention = @user1 @user2
 ```
 
 #### Step 5: Test Run (5 minutes)
@@ -121,7 +126,7 @@ source venv/bin/activate
 python gogetlinks_parser.py
 
 # Check logs
-tail -f gogetlinks_parser.log
+tail -f logs/gogetlinks_parser.log
 
 # Verify database
 mysql -u gogetlinks_parser -p gogetlinks -e "SELECT COUNT(*) FROM tasks;"
@@ -133,7 +138,7 @@ mysql -u gogetlinks_parser -p gogetlinks -e "SELECT COUNT(*) FROM tasks;"
 crontab -e
 
 # Add hourly job
-0 * * * * cd /home/user/gogetlinks-parser && /home/user/gogetlinks-parser/venv/bin/python gogetlinks_parser.py >> /var/log/gogetlinks_cron.log 2>&1
+0 * * * * cd /home/user/gogetlinks-api && /home/user/gogetlinks-api/venv/bin/python gogetlinks_parser.py >> /var/log/gogetlinks_cron.log 2>&1
 
 # Verify cron is active
 crontab -l
@@ -155,7 +160,7 @@ crontab -r
 mysqldump -u gogetlinks_parser -p gogetlinks > rollback_backup_$(date +%Y%m%d).sql
 
 # 3. Revert code to last stable version
-cd ~/gogetlinks-parser
+cd ~/gogetlinks-api
 git checkout tags/v1.0  # Or specific commit
 
 # 4. Restore database from backup (if needed)
@@ -181,13 +186,13 @@ crontab -e
 
 ```bash
 # Check error count (last 24h)
-grep -c "ERROR" gogetlinks_parser.log | tail -n 24
+grep -c "ERROR" logs/gogetlinks_parser.log | tail -n 24
 
 # Find failed auth attempts
-grep "Authentication failed" gogetlinks_parser.log
+grep "Authentication failed" logs/gogetlinks_parser.log
 
 # Check average execution time
-grep "Total execution time" gogetlinks_parser.log | awk '{sum+=$NF; count++} END {print sum/count}'
+grep "Total execution time" logs/gogetlinks_parser.log | awk '{sum+=$NF; count++} END {print sum/count}'
 
 # Count successful vs failed runs
 grep -c "Exit code: 0" /var/log/gogetlinks_cron.log
@@ -250,7 +255,7 @@ jobs:
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.SSH_KEY }}
           script: |
-            cd ~/gogetlinks-parser
+            cd ~/gogetlinks-api
             git pull origin main
             source venv/bin/activate
             pip install -r requirements.txt
@@ -280,7 +285,7 @@ jobs:
 
 **Code Structure:**
 ```
-gogetlinks-parser/
+gogetlinks-api/
 ├── gogetlinks_parser.py    # Main script
 ├── config.ini             # Credentials (gitignored)
 ├── schema.sql             # Database schema

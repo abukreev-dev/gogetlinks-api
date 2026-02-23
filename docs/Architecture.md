@@ -255,11 +255,16 @@ user = root
 password = db_password
 
 [output]
-print_tasks = true
+print_to_console = true
 
 [logging]
-level = INFO
-file = gogetlinks_parser.log
+log_level = INFO
+log_file = logs/gogetlinks_parser.log
+
+[telegram]
+bot_token = your_bot_token
+chat_id = your_chat_id
+mention = @user1 @user2
 ```
 
 **Validation Rules:**
@@ -438,8 +443,8 @@ sudo apt install mysql-server -y
 sudo mysql_secure_installation
 
 # Clone repository
-git clone https://github.com/user/gogetlinks-parser.git
-cd gogetlinks-parser
+git clone https://github.com/abukreev-dev/gogetlinks-api.git
+cd gogetlinks-api
 
 # Setup Python environment
 python3 -m venv venv
@@ -457,7 +462,7 @@ mysql -u root -p < schema.sql
 python gogetlinks_parser.py
 
 # Setup cron
-(crontab -l 2>/dev/null; echo "0 * * * * cd /path/to/gogetlinks-parser && venv/bin/python gogetlinks_parser.py >> /var/log/gogetlinks_parser_cron.log 2>&1") | crontab -
+(crontab -l 2>/dev/null; echo "0 * * * * cd /path/to/gogetlinks-api && venv/bin/python gogetlinks_parser.py >> /var/log/gogetlinks_parser_cron.log 2>&1") | crontab -
 ```
 
 ### Cron Configuration
@@ -465,10 +470,10 @@ python gogetlinks_parser.py
 **Hourly schedule:**
 ```cron
 # Run every hour at :00
-0 * * * * cd /home/user/gogetlinks-parser && venv/bin/python gogetlinks_parser.py
+0 * * * * cd /home/user/gogetlinks-api && venv/bin/python gogetlinks_parser.py
 
 # Alternative: Every 2 hours
-0 */2 * * * cd /home/user/gogetlinks-parser && venv/bin/python gogetlinks_parser.py
+0 */2 * * * cd /home/user/gogetlinks-api && venv/bin/python gogetlinks_parser.py
 ```
 
 **Monitoring:**
@@ -477,7 +482,7 @@ python gogetlinks_parser.py
 tail -f /var/log/gogetlinks_parser_cron.log
 
 # Check parser logs
-tail -f /home/user/gogetlinks-parser/gogetlinks_parser.log
+tail -f /home/user/gogetlinks-api/logs/gogetlinks_parser.log
 
 # Check last exit code
 echo $?
@@ -602,13 +607,13 @@ logger.info("Authenticating with email: {email}".format(
 
 ```bash
 # Count errors in last 24 hours
-grep -c "ERROR" gogetlinks_parser.log
+grep -c "ERROR" logs/gogetlinks_parser.log
 
 # Check exit codes
 grep -E "Exit code: [^0]" gogetlinks_parser_cron.log
 
 # Find slow cycles
-grep "Total execution time" gogetlinks_parser.log | awk '{print $NF}' | sort -nr | head
+grep "Total execution time" logs/gogetlinks_parser.log | awk '{print $NF}' | sort -nr | head
 ```
 
 ---

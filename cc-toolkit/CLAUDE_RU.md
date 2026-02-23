@@ -13,7 +13,7 @@
 ```bash
 # Установка
 git clone <repo>
-cd gogetlinks-parser
+cd gogetlinks-api
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
@@ -31,7 +31,7 @@ python gogetlinks_parser.py
 
 # Настройка cron
 crontab -e
-# Добавить: 0 * * * * cd ~/gogetlinks-parser && venv/bin/python gogetlinks_parser.py
+# Добавить: 0 * * * * cd ~/gogetlinks-api && venv/bin/python gogetlinks_parser.py
 ```
 
 ## Архитектурная сводка
@@ -71,7 +71,7 @@ Cron → Python Script
 5. Обновить `CHANGELOG.md`
 
 ### Исправить баг
-1. Проверить логи: `tail -f gogetlinks_parser.log`
+1. Проверить логи: `tail -f logs/gogetlinks_parser.log`
 2. Сделать скриншот при ошибке (если Selenium)
 3. Дамп HTML при сбоях парсинга
 4. Исправить + добавить регрессионный тест
@@ -207,10 +207,10 @@ crontab -e
 ### Мониторинг
 ```bash
 # Проверить статус последнего запуска
-tail -n 50 gogetlinks_parser.log | grep "Exit code"
+tail -n 50 logs/gogetlinks_parser.log | grep "Exit code"
 
 # Подсчитать ошибки (последние 24ч)
-grep -c "ERROR" gogetlinks_parser.log | tail -n 24
+grep -c "ERROR" logs/gogetlinks_parser.log | tail -n 24
 
 # Посмотреть новые задачи в БД
 mysql -u gogetlinks_parser -p -e "SELECT * FROM gogetlinks.tasks WHERE is_new=1 ORDER BY created_at DESC LIMIT 10;"

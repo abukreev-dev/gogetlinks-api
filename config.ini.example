@@ -32,11 +32,10 @@ mention =
 
 [output]
 # Выводить задачи в консоль (true для тестирования, false для cron)
-# print_tasks = false
 print_to_console = true
 
 [logging]
 # Уровень логирования: DEBUG, INFO, WARNING, ERROR, CRITICAL
 log_level = INFO
 # Путь к файлу логов (убедитесь что папка существует)
-log_file = gogetlinks_parser.log
+log_file = logs/gogetlinks_parser.log

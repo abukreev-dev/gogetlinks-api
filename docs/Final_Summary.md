@@ -151,7 +151,7 @@ Cron → Python Script → Selenium → gogetlinks.net
 
 **Command:** Start parser
 ```bash
-cd ~/gogetlinks-parser
+cd ~/gogetlinks-api
 source venv/bin/activate
 python gogetlinks_parser.py
 ```
@@ -163,7 +163,7 @@ SELECT * FROM tasks WHERE is_new = 1 ORDER BY created_at DESC;
 
 **Command:** Check logs
 ```bash
-tail -f ~/gogetlinks-parser/gogetlinks_parser.log
+tail -f ~/gogetlinks-api/logs/gogetlinks_parser.log
 ```
 
 **Command:** Monitor cron

@@ -50,7 +50,7 @@ unzip gogetlinks-parser-docs.zip
 unzip gogetlinks-parser-cc-toolkit.zip
 
 # Скопировать в корень проекта
-cd /path/to/gogetlinks-parser
+cd /path/to/gogetlinks-api
 cp -r gogetlinks-parser-cc-toolkit/.claude ./
 cp gogetlinks-parser-cc-toolkit/CLAUDE.md ./
 ```
