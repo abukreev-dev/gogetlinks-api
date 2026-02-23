@@ -33,11 +33,11 @@ make backup-db        # Timestamped MySQL dump
 
 Single-file monolith `gogetlinks_parser.py` (~1200 LOC) with logical modules:
 
-1. **Config** — `load_config()`, `validate_config()` from INI file; includes `[telegram]` section
+1. **Config** — `load_config()`, `validate_config()` from INI file; includes `[telegram]` section with `mention` for tagging team members
 2. **Database** — `connect_to_database()` (retry with backoff), `insert_or_update_task()` (upsert via ON DUPLICATE KEY UPDATE, returns is_new status)
 3. **Auth** — `initialize_driver()` (headless Chrome), `authenticate()` with modal login form, `solve_captcha()` via anti-captcha.com API
 4. **Parser** — `parse_task_list()` → `parse_task_row()` extracts fields from list; `parse_task_details()` opens AJAX modal per task and extracts description/url/requirements; `parse_price()` handles FREE/N/A/currency formats
-5. **Telegram** — `format_telegram_message()` formats HTML, `send_telegram_notification()` sends via Bot API
+5. **Telegram** — `format_telegram_message(tasks, mention)` formats compact HTML (type|price|domains), `send_telegram_notification()` sends via Bot API with configurable mention tags
 6. **Main** — `main()` orchestrates: config → DB → driver → auth → parse list → parse details → save → notify → cleanup
 
 Exit codes: 0=ok, 1=auth, 2=captcha, 3=config, 4=db, 5=webdriver, 99=unexpected.

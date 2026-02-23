@@ -91,7 +91,7 @@ nano config.ini
 - `[gogetlinks]` - логин и пароль от gogetlinks.net
 - `[anticaptcha]` - API ключ от anti-captcha.com
 - `[database]` - настройки MySQL
-- `[telegram]` - (опционально) bot_token и chat_id для уведомлений
+- `[telegram]` - (опционально) bot_token, chat_id, mention для уведомлений
 
 #### Шаг 3: Инициализация базы данных
 

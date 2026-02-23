@@ -94,6 +94,7 @@ password = db_password
 enabled = false
 bot_token = 123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
 chat_id = -100123456789
+mention = @user1 @user2
 
 [output]
 print_to_console = true
@@ -114,7 +115,8 @@ log_file = gogetlinks_parser.log
 
 ### v1.1 (текущая)
 - ✅ Парсинг детальной информации о задачах (описание, URL, требования, анкор)
-- ✅ Telegram-уведомления о новых задачах
+- ✅ Telegram-уведомления о новых задачах (цена в ₽, тип задачи, домены)
+- ✅ Настраиваемые теги сотрудников в уведомлениях (`mention`)
 - ✅ Реальные тесты с assertions (58 тестов)
 
 ### Планируемые (v1.2)
