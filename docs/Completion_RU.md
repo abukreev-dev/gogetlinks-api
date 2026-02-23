@@ -42,6 +42,9 @@ sudo apt install -y python3 python3-pip python3-venv git
 wget https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
 sudo dpkg -i google-chrome-stable_current_amd64.deb || sudo apt install -f -y
 
+# Проверка версии Chrome
+google-chrome --version
+
 # Установка MySQL
 sudo apt install -y mysql-server
 sudo mysql_secure_installation
@@ -65,27 +68,20 @@ mysql -u gogetlinks_parser -p gogetlinks < schema.sql
 ```bash
 # Клонирование репозитория
 cd ~
-git clone https://github.com/YOUR_USERNAME/gogetlinks-parser.git
-cd gogetlinks-parser
+git clone https://github.com/abukreev-dev/gogetlinks-api.git
+cd gogetlinks-api
 
-# Создание виртуального окружения
-python3 -m venv venv
-source venv/bin/activate
-
-# Установка зависимостей
-pip install -r requirements.txt
+# Установка (venv + зависимости + директория logs/)
+make install
 ```
 
 #### Шаг 4: Конфигурация (5 минут)
 ```bash
-# Копирование шаблона конфигурации
-cp config.ini.example config.ini
+# Создание config.ini из шаблона (chmod 600 автоматически)
+make setup-config
 
 # Редактирование конфигурации (вставка учетных данных)
 nano config.ini
-
-# Установка прав доступа
-chmod 600 config.ini
 ```
 
 **Пример config.ini:**
@@ -104,36 +100,49 @@ database = gogetlinks
 user = gogetlinks_parser
 password = STRONG_PASSWORD
 
+[telegram]
+# Уведомления о новых задачах (опционально)
+enabled = true
+bot_token = 123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
+chat_id = -100123456789
+# Кого тегать в уведомлениях (через пробел)
+mention = @user1 @user2
+
 [output]
-print_tasks = false
+print_to_console = false
 
 [logging]
-level = INFO
-file = /home/user/gogetlinks-parser/gogetlinks_parser.log
+log_level = INFO
+log_file = logs/gogetlinks_parser.log
 ```
 
-#### Шаг 5: Тестовый запуск (5 минут)
+#### Шаг 5: Проверка и тестовый запуск (5 минут)
 ```bash
-# Активация виртуального окружения
-source venv/bin/activate
+# Проверить готовность к деплою (Python, Chrome, MySQL, файлы)
+make deploy-check
 
 # Запуск парсера вручную
-python gogetlinks_parser.py
+make run
 
 # Проверка логов
-tail -f gogetlinks_parser.log
+make logs
 
-# Проверка базы данных
-mysql -u gogetlinks_parser -p gogetlinks -e "SELECT COUNT(*) FROM tasks;"
+# Проверка новых задач в базе данных
+make db-tasks
 ```
+
+**Примечание о сессиях:** После первого успешного запуска парсер сохраняет cookies в `session_cookies.pkl` (chmod 600). При следующих запусках он использует сохранённую сессию, пропуская авторизацию и решение капчи. Файл автоматически удаляется при истечении сессии.
 
 #### Шаг 6: Настройка Cron (5 минут)
 ```bash
+# Посмотреть рекомендуемую строку для crontab
+make setup-cron
+
 # Редактирование crontab
 crontab -e
 
-# Добавление ежечасной задачи
-0 * * * * cd /home/user/gogetlinks-parser && /home/user/gogetlinks-parser/venv/bin/python gogetlinks_parser.py >> /var/log/gogetlinks_cron.log 2>&1
+# Добавление ежечасной задачи (пример)
+0 * * * * cd /home/user/gogetlinks-api && /home/user/gogetlinks-api/venv/bin/python gogetlinks_parser.py >> /var/log/gogetlinks_cron.log 2>&1
 
 # Проверка активности cron
 crontab -l
@@ -155,8 +164,8 @@ crontab -r
 mysqldump -u gogetlinks_parser -p gogetlinks > rollback_backup_$(date +%Y%m%d).sql
 
 # 3. Откат кода к последней стабильной версии
-cd ~/gogetlinks-parser
-git checkout tags/v1.0  # Или конкретный коммит
+cd ~/gogetlinks-api
+git checkout tags/v1.2  # Или конкретный коммит
 
 # 4. Восстановление базы данных из резервной копии (при необходимости)
 mysql -u gogetlinks_parser -p gogetlinks < backup.sql
@@ -177,19 +186,19 @@ crontab -e
 | Новых задач в день | Базовое значение | Отклонение на 50% |
 | Рост базы данных | ~100 МБ/месяц | >500 МБ/месяц |
 
-### Команды мониторинга логов
+### Команды мониторинга
 
 ```bash
-# Проверка количества ошибок (последние 24 часа)
-grep -c "ERROR" gogetlinks_parser.log | tail -n 24
+# Быстрый просмотр через Makefile
+make logs           # Последние 50 строк лога
+make logs-errors    # Только ошибки
+make db-tasks       # Новые задачи в БД
 
-# Поиск неудачных попыток аутентификации
-grep "Authentication failed" gogetlinks_parser.log
+# Детальная диагностика
+grep "Authentication failed" logs/gogetlinks_parser.log
+grep "Total execution time" logs/gogetlinks_parser.log | awk '{sum+=$NF; count++} END {print sum/count}'
 
-# Проверка среднего времени выполнения
-grep "Total execution time" gogetlinks_parser.log | awk '{sum+=$NF; count++} END {print sum/count}'
-
-# Подсчет успешных и неудачных запусков
+# Статистика cron
 grep -c "Exit code: 0" /var/log/gogetlinks_cron.log
 grep -c "Exit code: [^0]" /var/log/gogetlinks_cron.log
 ```
@@ -207,13 +216,10 @@ def send_alert(subject, body):
     # - Нет успешного запуска в течение 12 часов
 ```
 
-**Telegram бот (будущее):**
-```python
-def send_telegram_alert(message):
-    import requests
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    requests.post(url, json={"chat_id": CHAT_ID, "text": message})
-```
+**Telegram уведомления (реализовано в v1.1):**
+Парсер отправляет уведомления о новых задачах в Telegram-чат через Bot API.
+Формат: компактный HTML с типом задачи, ценой и доменами. Поддержка тегов `mention` для оповещения команды.
+Настройка в секции `[telegram]` файла `config.ini` (опционально).
 
 ## CI/CD конвейер (будущее улучшение)
 
@@ -250,7 +256,7 @@ jobs:
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.SSH_KEY }}
           script: |
-            cd ~/gogetlinks-parser
+            cd ~/gogetlinks-api
             git pull origin main
             source venv/bin/activate
             pip install -r requirements.txt
@@ -262,10 +268,27 @@ jobs:
 ### Для команды эксплуатации
 
 **Руководство по эксплуатации:**
-1. **Ежедневная проверка:** Просмотр логов cron на наличие ошибок
+1. **Ежедневная проверка:** `make logs-errors` — просмотр ошибок
 2. **Еженедельно:** Проверка баланса капчи > $10
-3. **Ежемесячно:** Резервное копирование базы данных
-4. **При оповещении:** Проверка логов, перезапуск cron при необходимости
+3. **Ежемесячно:** `make backup-db` — резервное копирование базы данных
+4. **При оповещении:** `make logs` — проверка логов, перезапуск cron при необходимости
+
+**Makefile — основные команды:**
+
+Полный список: `make help`
+
+| Команда | Описание |
+|---------|----------|
+| `make run` | Запустить парсер |
+| `make run-debug` | Запустить с debug-выводом |
+| `make logs` | Последние 50 строк лога |
+| `make logs-errors` | Только ошибки из лога |
+| `make db-tasks` | Новые задачи из БД |
+| `make deploy-check` | Проверить готовность (Python, Chrome, MySQL, файлы) |
+| `make backup-db` | Создать timestamped дамп БД |
+| `make test` | Запустить тесты |
+| `make test-cov` | Тесты + покрытие |
+| `make clean` | Очистить кеши |
 
 **Распространенные проблемы:**
 
@@ -280,13 +303,17 @@ jobs:
 
 **Структура кода:**
 ```
-gogetlinks-parser/
-├── gogetlinks_parser.py    # Основной скрипт
+gogetlinks-api/
+├── gogetlinks_parser.py    # Основной скрипт (~1200 LOC)
 ├── config.ini             # Учетные данные (в gitignore)
+├── config.ini.example     # Шаблон конфигурации
 ├── schema.sql             # Схема базы данных
 ├── requirements.txt       # Зависимости Python
+├── Makefile               # Автоматизация команд
+├── session_cookies.pkl    # Сессионные cookies (в gitignore)
+├── logs/                  # Директория логов
 ├── tests/                 # Модульные и интеграционные тесты
-├── docs/                  # Документация SPARC
+├── docs/                  # Документация
 └── README.md              # Руководство по быстрому старту
 ```
 
@@ -318,6 +345,6 @@ cp config.ini config_test.ini
 
 ---
 
-**Версия развертывания:** 1.0
+**Версия развертывания:** 1.2
 **Расчетное время развертывания:** 40 минут
 **Время отката:** 10 минут

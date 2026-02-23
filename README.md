@@ -17,28 +17,27 @@
 git clone https://github.com/abukreev-dev/gogetlinks-api.git
 cd gogetlinks-api
 
-# 2. Создать виртуальное окружение
-python3 -m venv venv
-source venv/bin/activate
+# 2. Установить зависимости (создаёт venv, ставит пакеты, создаёт logs/)
+make install
 
-# 3. Установить зависимости
-pip install -r requirements.txt
+# 3. Настроить конфигурацию
+make setup-config   # Создаёт config.ini из шаблона (chmod 600)
+nano config.ini     # Заполнить credentials
 
-# 4. Настроить конфигурацию
-cp config.ini.example config.ini
-nano config.ini  # Заполнить credentials
-chmod 600 config.ini
+# 4. Инициализировать базу данных
+make setup-db
 
-# 5. Инициализировать базу данных
-mysql -u root -p < schema.sql
+# 5. Проверить готовность
+make deploy-check
 
 # 6. Запустить парсер
-python gogetlinks_parser.py
+make run
 ```
 
 ### Настройка cron
 
 ```bash
+make setup-cron  # Покажет строку для добавления в crontab
 crontab -e
 # Добавить строку для запуска каждый час:
 0 * * * * cd ~/gogetlinks-api && venv/bin/python gogetlinks_parser.py >> /var/log/gogetlinks_cron.log 2>&1
@@ -101,7 +100,7 @@ print_to_console = true
 
 [logging]
 log_level = INFO
-log_file = gogetlinks_parser.log
+log_file = logs/gogetlinks_parser.log
 ```
 
 ## 🎯 Основные функции
@@ -156,30 +155,66 @@ CREATE TABLE tasks (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 ```
 
+## 🛠️ Makefile команды
+
+Проект использует Makefile для автоматизации всех рутинных операций. Полный список команд: `make help`
+
+### Установка и настройка
+
+| Команда | Описание |
+|---------|----------|
+| `make install` | Создать venv, установить зависимости, создать `logs/` |
+| `make install-dev` | + dev-зависимости (pytest, black, flake8, mypy) |
+| `make setup-config` | Создать `config.ini` из шаблона (chmod 600) |
+| `make setup-db` | Инициализировать MySQL из `schema.sql` |
+| `make all` | Полная установка: install + setup-config + setup-db + test |
+
+### Запуск
+
+| Команда | Описание |
+|---------|----------|
+| `make run` | Запустить парсер |
+| `make run-debug` | Запустить с выводом в консоль и `debug.log` |
+
+### Тестирование и качество кода
+
+| Команда | Описание |
+|---------|----------|
+| `make test` | Запустить все тесты |
+| `make test-cov` | Тесты + отчёт о покрытии |
+| `make lint` | Проверка flake8 |
+| `make format` | Форматирование black |
+| `make type-check` | Проверка типов mypy |
+
+### Мониторинг и обслуживание
+
+| Команда | Описание |
+|---------|----------|
+| `make logs` | Последние 50 строк лога |
+| `make logs-errors` | Только ошибки из лога |
+| `make db-tasks` | Новые задачи из БД (последние 10) |
+| `make deploy-check` | Проверить готовность к деплою (Python, Chrome, MySQL, файлы) |
+| `make setup-cron` | Показать строку для crontab |
+| `make backup-db` | Создать timestamped дамп БД |
+| `make clean` | Очистить кеши (__pycache__, .pytest_cache и т.д.) |
+| `make clean-all` | Полная очистка включая venv |
+
 ## 🧪 Тестирование
 
 ```bash
-# Запустить все тесты
-pytest tests/
+make test           # Все тесты
+make test-cov       # Тесты + покрытие
 
-# Запустить с покрытием
-pytest --cov=gogetlinks_parser tests/
-
-# Конкретный тест
-pytest tests/test_parser.py::test_price_parsing
+# Конкретный тест (через venv напрямую)
+. venv/bin/activate && pytest tests/test_parser.py::test_price_parsing
 ```
 
 ## 🔍 Мониторинг
 
 ```bash
-# Проверить последний запуск
-tail -n 50 gogetlinks_parser.log | grep "Exit code"
-
-# Подсчитать ошибки за последние 24 часа
-grep -c "ERROR" gogetlinks_parser.log | tail -n 24
-
-# Посмотреть новые задачи в БД
-mysql -u gogetlinks_parser -p -e "SELECT * FROM gogetlinks.tasks WHERE is_new=1 ORDER BY created_at DESC LIMIT 10;"
+make logs           # Последние 50 строк лога
+make logs-errors    # Только ошибки
+make db-tasks       # Новые задачи в БД
 ```
 
 ## 🐛 Устранение неполадок
