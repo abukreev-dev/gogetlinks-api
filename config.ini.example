@@ -20,6 +20,14 @@ database = gogetlinks
 user = gogetlinks_parser
 password = your_db_password
 
+[telegram]
+# Telegram-уведомления о новых задачах
+# Создайте бота через @BotFather и получите токен
+# Добавьте бота в групповой чат и получите chat_id
+enabled = false
+bot_token = 123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
+chat_id = -100123456789
+
 [output]
 # Выводить задачи в консоль (true для тестирования, false для cron)
 # print_tasks = false
