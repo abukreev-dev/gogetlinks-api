@@ -65,21 +65,31 @@ class TestTelegramMessage:
 
         assert "Test Task One" in message
         assert "Test Task Two" in message
-        assert "$50.00" in message
-        assert "$100.00" in message
+        assert "50 ₽" in message
+        assert "100 ₽" in message
         assert "example.com" in message
+        assert "Client A" in message
 
-    def test_format_message_includes_description(self, sample_tasks):
-        """Тест что описание включается в сообщение."""
+    def test_format_message_includes_link(self, sample_tasks):
+        """Тест что ссылка на задачи включается в сообщение."""
         message = format_telegram_message(sample_tasks)
 
-        assert "Some description" in message
+        assert "https://gogetlinks.net/webTask" in message
 
-    def test_format_message_includes_url(self, sample_tasks):
-        """Тест что URL включается в сообщение."""
-        message = format_telegram_message(sample_tasks)
+    def test_format_message_free_price(self):
+        """Тест отображения бесплатных задач."""
+        tasks = [
+            {
+                "task_id": 1,
+                "title": "Free Task",
+                "domain": "test.com",
+                "customer": "client.com",
+                "price": Decimal("0.00"),
+            }
+        ]
+        message = format_telegram_message(tasks)
 
-        assert "https://example.com/page" in message
+        assert "бесплатно" in message
 
     def test_format_message_html_escaping(self):
         """Тест экранирования HTML в сообщении."""

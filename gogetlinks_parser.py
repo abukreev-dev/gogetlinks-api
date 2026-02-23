@@ -1207,35 +1207,28 @@ def format_telegram_message(tasks: List[Dict[str, Any]]) -> str:
     Returns:
         HTML-formatted message string
     """
-    lines = [f"<b>🔔 Новые задачи GoGetLinks ({len(tasks)})</b>\n"]
+    lines = [f"<b>Новые задачи GoGetLinks ({len(tasks)})</b>"]
 
     for task in tasks:
-        price_str = f"${task['price']:.2f}" if task.get("price") else "N/A"
-        domain = html.escape(task.get("domain", "—"))
+        price = task.get("price")
+        price_str = f"{price:.0f} ₽" if price and price > 0 else "бесплатно"
         title = html.escape(task.get("title", "—"))
+        domain = html.escape(task.get("domain", "—"))
         customer = html.escape(task.get("customer", "—"))
 
-        task_line = (
-            f"<b>{title}</b>\n"
-            f"  💰 {price_str} | 🌐 {domain}\n"
-            f"  👤 {customer}"
-        )
-
-        if task.get("description"):
-            desc = html.escape(task["description"][:200])
-            task_line += f"\n  📝 {desc}"
-
-        if task.get("url"):
-            url = html.escape(task["url"])
-            task_line += f"\n  🔗 {url}"
-
+        task_line = f"• {title} | {price_str} | {domain} → {customer}"
         lines.append(task_line)
 
-    message = "\n\n".join(lines)
+    lines.append("")
+    lines.append('<a href="https://gogetlinks.net/webTask">Открыть задачи</a>')
+
+    message = "\n".join(lines)
 
     # Truncate if too long
     if len(message) > TELEGRAM_MAX_MESSAGE_LENGTH:
-        message = message[: TELEGRAM_MAX_MESSAGE_LENGTH - 20] + "\n\n<i>...обрезано</i>"
+        footer = '\n\n<a href="https://gogetlinks.net/webTask">Открыть задачи</a>'
+        message = message[: TELEGRAM_MAX_MESSAGE_LENGTH - len(footer) - 20]
+        message += "\n<i>...обрезано</i>" + footer
 
     return message
 
