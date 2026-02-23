@@ -35,7 +35,7 @@ Single-file monolith `gogetlinks_parser.py` (~1200 LOC) with logical modules:
 
 1. **Config** — `load_config()`, `validate_config()` from INI file; includes `[telegram]` section with `mention` for tagging team members
 2. **Database** — `connect_to_database()` (retry with backoff), `insert_or_update_task()` (upsert via ON DUPLICATE KEY UPDATE, returns is_new status)
-3. **Auth** — `initialize_driver()` (headless Chrome), `authenticate()` with modal login form, `solve_captcha()` via anti-captcha.com API
+3. **Auth** — `initialize_driver()` (headless Chrome), `authenticate()` with modal login form, `solve_captcha()` via anti-captcha.com API, `save_cookies()`/`load_cookies()` for session persistence (pickle + chmod 600)
 4. **Parser** — `parse_task_list()` → `parse_task_row()` extracts fields from list; `parse_task_details()` opens AJAX modal per task and extracts description/url/requirements; `parse_price()` handles FREE/N/A/currency formats
 5. **Telegram** — `format_telegram_message(tasks, mention)` formats compact HTML (type|price|domains), `send_telegram_notification()` sends via Bot API with configurable mention tags
 6. **Main** — `main()` orchestrates: config → DB → driver → auth → parse list → parse details → save → notify → cleanup
@@ -63,5 +63,5 @@ Detailed rules live in `.claude/rules/` (coding-style, git-workflow, testing, se
 - Title in list view is task type from `.site-link__campaign` (e.g. "Заметка", "Контекстная ссылка"), not a descriptive title
 - `insert_or_update_task()` returns `Optional[bool]`: `True`=new, `False`=updated, `None`=error
 - Telegram section in config is optional (fallback defaults if missing)
-- Session persistence (cookie save/load) is **not yet implemented**
-- Tests: 58 tests with real assertions (parser, details, telegram, html cleaning)
+- Session cookies saved to `session_cookies.pkl` (gitignored, chmod 600) — stale file auto-deleted on expired session
+- Tests: 64 tests with real assertions (parser, details, telegram, html cleaning, cookie session)
