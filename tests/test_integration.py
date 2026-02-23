@@ -10,6 +10,9 @@ from unittest.mock import Mock, patch, MagicMock
 from gogetlinks_parser import (
     format_telegram_message,
     send_telegram_notification,
+    save_cookies,
+    load_cookies,
+    COOKIE_FILE,
 )
 
 
@@ -228,6 +231,106 @@ class TestTelegramSending:
     def test_send_notification_empty_tasks(self, telegram_config, logger):
         """Тест с пустым списком задач."""
         result = send_telegram_notification([], telegram_config, logger)
+
+        assert result is False
+
+
+class TestCookieSession:
+    """Тесты сохранения и загрузки cookies."""
+
+    def test_save_cookies_creates_file(self, logger, tmp_path):
+        """Тест сохранения cookies в файл."""
+        cookie_file = tmp_path / "test_cookies.pkl"
+        mock_driver = Mock()
+        mock_driver.get_cookies.return_value = [
+            {"name": "session", "value": "abc123", "domain": ".gogetlinks.net"},
+        ]
+
+        with patch("gogetlinks_parser.COOKIE_FILE", str(cookie_file)):
+            save_cookies(mock_driver, logger)
+
+        assert cookie_file.exists()
+        # Check permissions (0o600)
+        import stat
+        mode = cookie_file.stat().st_mode & 0o777
+        assert mode == 0o600
+
+    def test_save_cookies_content(self, logger, tmp_path):
+        """Тест что cookies корректно сериализуются."""
+        import pickle
+        cookie_file = tmp_path / "test_cookies.pkl"
+        cookies = [
+            {"name": "sid", "value": "xyz", "domain": ".gogetlinks.net"},
+            {"name": "auth", "value": "token", "domain": ".gogetlinks.net"},
+        ]
+        mock_driver = Mock()
+        mock_driver.get_cookies.return_value = cookies
+
+        with patch("gogetlinks_parser.COOKIE_FILE", str(cookie_file)):
+            save_cookies(mock_driver, logger)
+
+        with open(cookie_file, "rb") as f:
+            loaded = pickle.load(f)
+        assert len(loaded) == 2
+        assert loaded[0]["name"] == "sid"
+
+    def test_load_cookies_no_file(self, logger):
+        """Тест загрузки когда файла нет."""
+        mock_driver = Mock()
+
+        with patch("gogetlinks_parser.COOKIE_FILE", "/nonexistent/cookies.pkl"):
+            result = load_cookies(mock_driver, logger)
+
+        assert result is False
+
+    def test_load_cookies_success(self, logger, tmp_path):
+        """Тест успешной загрузки cookies и восстановления сессии."""
+        import pickle
+        import os
+        cookie_file = tmp_path / "test_cookies.pkl"
+        cookies = [{"name": "session", "value": "abc", "domain": ".gogetlinks.net"}]
+        with open(cookie_file, "wb") as f:
+            pickle.dump(cookies, f)
+        os.chmod(cookie_file, 0o600)
+
+        mock_driver = Mock()
+        with patch("gogetlinks_parser.COOKIE_FILE", str(cookie_file)), \
+             patch("gogetlinks_parser.is_authenticated", return_value=True):
+            result = load_cookies(mock_driver, logger)
+
+        assert result is True
+        mock_driver.add_cookie.assert_called_once_with(cookies[0])
+
+    def test_load_cookies_expired_session(self, logger, tmp_path):
+        """Тест когда cookies загрузились но сессия протухла."""
+        import pickle
+        import os
+        cookie_file = tmp_path / "test_cookies.pkl"
+        with open(cookie_file, "wb") as f:
+            pickle.dump([{"name": "old", "value": "expired"}], f)
+        os.chmod(cookie_file, 0o600)
+
+        mock_driver = Mock()
+        with patch("gogetlinks_parser.COOKIE_FILE", str(cookie_file)), \
+             patch("gogetlinks_parser.is_authenticated", return_value=False):
+            result = load_cookies(mock_driver, logger)
+
+        assert result is False
+        # Stale cookie file should be removed
+        assert not cookie_file.exists()
+
+    def test_load_cookies_insecure_permissions(self, logger, tmp_path):
+        """Тест что файл с широкими правами отклоняется."""
+        import pickle
+        import os
+        cookie_file = tmp_path / "test_cookies.pkl"
+        with open(cookie_file, "wb") as f:
+            pickle.dump([{"name": "x", "value": "y"}], f)
+        os.chmod(cookie_file, 0o644)  # Too permissive
+
+        mock_driver = Mock()
+        with patch("gogetlinks_parser.COOKIE_FILE", str(cookie_file)):
+            result = load_cookies(mock_driver, logger)
 
         assert result is False
 

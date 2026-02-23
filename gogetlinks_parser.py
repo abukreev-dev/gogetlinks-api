@@ -21,6 +21,8 @@ Exit Codes:
 import configparser
 import html
 import logging
+import os
+import pickle
 import re
 import sys
 import time
@@ -87,6 +89,9 @@ SELECTOR_MODAL_CLOSE = "a[rel='modal:close']"
 
 # Rate limiting for detail parsing
 DETAIL_REQUEST_DELAY = 1.5
+
+# Session persistence
+COOKIE_FILE = "session_cookies.pkl"
 
 # Anti-Captcha API
 ANTICAPTCHA_CREATE_TASK_URL = "https://api.anti-captcha.com/createTask"
@@ -468,6 +473,77 @@ def is_authenticated(driver: webdriver.Chrome) -> bool:
         return True
     except NoSuchElementException:
         return False
+
+
+def save_cookies(driver: webdriver.Chrome, logger: logging.Logger) -> None:
+    """Save browser cookies to file for session persistence.
+
+    Args:
+        driver: Chrome WebDriver with active session
+        logger: Logger instance
+    """
+    try:
+        cookies = driver.get_cookies()
+        with open(COOKIE_FILE, "wb") as f:
+            pickle.dump(cookies, f)
+        os.chmod(COOKIE_FILE, 0o600)
+        logger.info(f"Saved {len(cookies)} cookies to {COOKIE_FILE}")
+    except Exception as e:
+        logger.warning(f"Failed to save cookies: {e}")
+
+
+def load_cookies(driver: webdriver.Chrome, logger: logging.Logger) -> bool:
+    """Load cookies from file and verify authentication.
+
+    Args:
+        driver: Chrome WebDriver
+        logger: Logger instance
+
+    Returns:
+        True if cached session is valid, False otherwise
+    """
+    if not os.path.exists(COOKIE_FILE):
+        logger.debug("No cookie file found")
+        return False
+
+    # Verify file permissions (not wider than 0o600)
+    stat = os.stat(COOKIE_FILE)
+    if stat.st_mode & 0o077:
+        logger.warning("Cookie file has insecure permissions, skipping")
+        return False
+
+    try:
+        with open(COOKIE_FILE, "rb") as f:
+            cookies = pickle.load(f)
+    except Exception as e:
+        logger.warning(f"Failed to load cookies: {e}")
+        return False
+
+    # Navigate to domain first (required for adding cookies)
+    driver.get(HOME_URL)
+    time.sleep(2)
+
+    for cookie in cookies:
+        try:
+            driver.add_cookie(cookie)
+        except Exception as e:
+            logger.debug(f"Skipping cookie {cookie.get('name', '?')}: {e}")
+
+    # Refresh page with cookies applied
+    driver.get(HOME_URL)
+    time.sleep(2)
+
+    if is_authenticated(driver):
+        logger.info("Using cached session (cookies loaded successfully)")
+        return True
+
+    logger.info("Cached session expired, need fresh authentication")
+    # Remove stale cookie file
+    try:
+        os.remove(COOKIE_FILE)
+    except OSError:
+        pass
+    return False
 
 
 def extract_captcha_sitekey(driver: webdriver.Chrome, logger: logging.Logger) -> Optional[str]:
@@ -1354,17 +1430,20 @@ def main() -> int:
             logger.error(f"WebDriver error: {e}")
             return EXIT_WEBDRIVER_ERROR
 
-        # 5. Authenticate
-        auth_success = authenticate(
-            driver=driver,
-            credentials=config["gogetlinks"],
-            anticaptcha_config=config["anticaptcha"],
-            logger=logger,
-        )
+        # 5. Try cached session, then authenticate
+        if not load_cookies(driver, logger):
+            auth_success = authenticate(
+                driver=driver,
+                credentials=config["gogetlinks"],
+                anticaptcha_config=config["anticaptcha"],
+                logger=logger,
+            )
 
-        if not auth_success:
-            logger.error("Authentication failed")
-            return EXIT_AUTH_FAILED
+            if not auth_success:
+                logger.error("Authentication failed")
+                return EXIT_AUTH_FAILED
+
+            save_cookies(driver, logger)
 
         # 6. Parse task list
         tasks = parse_task_list(driver, logger)
