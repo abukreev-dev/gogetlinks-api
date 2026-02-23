@@ -1,8 +1,25 @@
 """
 Тесты модуля парсинга
 """
+import logging
+
 import pytest
 from decimal import Decimal
+from unittest.mock import Mock, patch, MagicMock
+
+from gogetlinks_parser import (
+    parse_price,
+    extract_task_id,
+    parse_task_row,
+    parse_task_details,
+    sanitize_text,
+)
+
+
+@pytest.fixture
+def logger():
+    """Logger fixture for tests."""
+    return logging.getLogger("test")
 
 
 class TestPriceParser:
@@ -11,73 +28,145 @@ class TestPriceParser:
     @pytest.mark.parametrize("input_price,expected", [
         ("$123.45", Decimal("123.45")),
         ("1,234.56", Decimal("1234.56")),
-        ("50.00 USD", Decimal("50.00")),
+        ("$50.00", Decimal("50.00")),
         ("FREE", Decimal("0.00")),
         ("", Decimal("0.00")),
-        ("TBD", Decimal("0.00")),
+        ("N/A", Decimal("0.00")),
+        ("0", Decimal("0")),
+        ("$0.00", Decimal("0.00")),
+        ("1000", Decimal("1000")),
+        ("99.99 руб", Decimal("99.99")),
     ])
     def test_parse_price_robust(self, input_price, expected):
-        """Тест парсинга различных форматов цен"""
-        # TODO: Реализовать parse_price_robust()
-        pass
+        """Тест парсинга различных форматов цен."""
+        assert parse_price(input_price) == expected
 
 
 class TestTaskIdExtraction:
     """Тесты извлечения ID задачи"""
 
     def test_extract_task_id_valid(self):
-        """Тест извлечения валидного ID"""
-        # TODO: Реализовать extract_task_id()
-        pass
+        """Тест извлечения валидного ID."""
+        assert extract_task_id("col_row_123456") == 123456
 
-    def test_extract_task_id_invalid(self):
-        """Тест обработки невалидного ID"""
-        # TODO: Реализовать extract_task_id() с обработкой ошибок
-        pass
+    def test_extract_task_id_large(self):
+        """Тест извлечения большого ID."""
+        assert extract_task_id("col_row_9999999") == 9999999
+
+    def test_extract_task_id_invalid_format(self):
+        """Тест обработки невалидного формата."""
+        with pytest.raises(ValueError, match="Invalid row ID format"):
+            extract_task_id("invalid")
+
+    def test_extract_task_id_non_numeric(self):
+        """Тест обработки нечислового ID."""
+        with pytest.raises(ValueError, match="Could not parse task_id"):
+            extract_task_id("col_row_abc")
 
 
-class TestTaskListParser:
-    """Тесты парсинга списка задач"""
+class TestTaskRowParser:
+    """Тесты парсинга строки задачи"""
 
-    def test_parse_task_list_success(self, mock_driver):
-        """Тест успешного парсинга списка задач"""
-        # TODO: Реализовать parse_task_list()
-        pass
+    def test_parse_task_row_success(self, sample_task_row, logger):
+        """Тест успешного парсинга строки задачи."""
+        task = parse_task_row(sample_task_row, logger)
 
-    def test_parse_task_list_empty(self, mock_driver):
-        """Тест парсинга пустого списка"""
-        # TODO: Реализовать parse_task_list() для пустого списка
-        pass
+        assert task is not None
+        assert task["task_id"] == 123456
+        assert task["domain"] == "example.com"
+        assert task["customer"] == "Test Client"
+        assert task["external_links"] == 5
+        assert task["price"] == Decimal("50.00")
 
-    def test_parse_task_row(self, sample_task_row):
-        """Тест парсинга одной строки задачи"""
-        # TODO: Реализовать parse_task_row()
-        pass
+    def test_parse_task_row_no_id(self, logger):
+        """Тест парсинга строки без ID."""
+        row = Mock()
+        row.get_attribute.return_value = None
+
+        task = parse_task_row(row, logger)
+        assert task is None
+
+    def test_parse_task_row_few_cells(self, logger):
+        """Тест парсинга строки с недостаточным числом ячеек."""
+        row = Mock()
+        row.get_attribute.return_value = "col_row_123"
+        row.find_elements.return_value = [Mock(), Mock()]
+
+        task = parse_task_row(row, logger)
+        assert task is None
 
 
 class TestTaskDetailsParser:
     """Тесты парсинга деталей задачи"""
 
-    def test_parse_task_details(self, mock_driver):
-        """Тест парсинга детальной страницы задачи"""
-        # TODO: Реализовать parse_task_details()
-        pass
+    def test_parse_task_details_success(self, logger):
+        """Тест парсинга деталей задачи из модалки."""
+        driver = Mock()
 
-    def test_parse_task_details_404(self, mock_driver):
-        """Тест обработки 404 при парсинге деталей"""
-        # TODO: Реализовать обработку 404
-        pass
+        # Mock modal element
+        modal = Mock()
+        modal.get_attribute.return_value = "<div>Task details</div>"
+        modal.text = "Full task description text content here"
+
+        # Mock description elements
+        desc_elem = Mock()
+        desc_elem.text = "Task description paragraph"
+        modal.find_elements.return_value = [desc_elem]
+
+        driver.find_element.return_value = modal
+
+        # Mock WebDriverWait
+        with patch("gogetlinks_parser.WebDriverWait") as mock_wait:
+            mock_wait.return_value.until.return_value = modal
+
+            details = parse_task_details(driver, 123, logger)
+
+        assert details["description"] is not None
+
+    def test_parse_task_details_timeout(self, logger):
+        """Тест таймаута при открытии модалки."""
+        from selenium.common.exceptions import TimeoutException
+
+        driver = Mock()
+        driver.execute_script.return_value = None
+
+        with patch("gogetlinks_parser.WebDriverWait") as mock_wait:
+            mock_wait.return_value.until.side_effect = TimeoutException()
+
+            details = parse_task_details(driver, 999, logger)
+
+        assert details["description"] is None
+        assert details["url"] is None
+        assert details["requirements"] is None
+
+    def test_parse_task_details_returns_all_keys(self, logger):
+        """Тест что возвращаются все ожидаемые ключи."""
+        driver = Mock()
+
+        with patch("gogetlinks_parser.WebDriverWait") as mock_wait:
+            from selenium.common.exceptions import TimeoutException
+            mock_wait.return_value.until.side_effect = TimeoutException()
+
+            details = parse_task_details(driver, 1, logger)
+
+        expected_keys = {"description", "url", "requirements", "contacts", "deadline"}
+        assert set(details.keys()) == expected_keys
 
 
 class TestHTMLCleaning:
     """Тесты очистки HTML"""
 
-    def test_decode_html_entities(self):
-        """Тест декодирования HTML entities"""
-        # TODO: Реализовать decode_html_entities()
-        pass
+    def test_sanitize_html_entities(self):
+        """Тест декодирования HTML entities."""
+        assert sanitize_text("Hello &amp; World") == "Hello & World"
+        assert sanitize_text("&lt;b&gt;bold&lt;/b&gt;") == "<b>bold</b>"
 
-    def test_decode_cyrillic(self):
-        """Тест декодирования кириллицы из Windows-1251"""
-        # TODO: Реализовать decode_cyrillic()
-        pass
+    def test_sanitize_whitespace(self):
+        """Тест нормализации пробелов."""
+        assert sanitize_text("  hello   world  ") == "hello world"
+        assert sanitize_text("line1\n  line2\t  line3") == "line1 line2 line3"
+
+    def test_sanitize_empty(self):
+        """Тест обработки пустой строки."""
+        assert sanitize_text("") == ""
+        assert sanitize_text("   ") == ""

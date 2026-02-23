@@ -79,6 +79,15 @@ SELECTOR_LOGIN_PASSWORD = "input.js-password[name='password']"
 SELECTOR_LOGIN_SUBMIT = "button.js-send-sign-in[type='submit']"
 SELECTOR_PROFILE_LINK = "a[href='/profile']"
 
+# Detail modal selectors
+SELECTOR_DETAIL_LINK = "a[rel='modal:open']"
+SELECTOR_MODAL = ".jquery-modal.blocker"
+SELECTOR_MODAL_CONTENT = ".modal"
+SELECTOR_MODAL_CLOSE = "a[rel='modal:close']"
+
+# Rate limiting for detail parsing
+DETAIL_REQUEST_DELAY = 1.5
+
 # Anti-Captcha API
 ANTICAPTCHA_CREATE_TASK_URL = "https://api.anti-captcha.com/createTask"
 ANTICAPTCHA_GET_RESULT_URL = "https://api.anti-captcha.com/getTaskResult"
@@ -123,6 +132,11 @@ def load_config(config_path: str = "config.ini") -> Dict[str, Any]:
             "user": parser.get("database", "user"),
             "password": parser.get("database", "password"),
             "database": parser.get("database", "database"),
+        },
+        "telegram": {
+            "enabled": parser.getboolean("telegram", "enabled", fallback=False),
+            "bot_token": parser.get("telegram", "bot_token", fallback=""),
+            "chat_id": parser.get("telegram", "chat_id", fallback=""),
         },
         "output": {
             "print_to_console": parser.getboolean("output", "print_to_console"),
@@ -304,7 +318,7 @@ def task_exists(conn: MySQLConnection, task_id: int) -> bool:
 
 def insert_or_update_task(
     conn: MySQLConnection, task: Dict[str, Any], logger: logging.Logger
-) -> bool:
+) -> Optional[bool]:
     """Insert task or update if duplicate.
 
     Uses INSERT ... ON DUPLICATE KEY UPDATE pattern.
@@ -316,7 +330,7 @@ def insert_or_update_task(
         logger: Logger instance
 
     Returns:
-        True if operation succeeded, False otherwise
+        True if task is new (inserted), False if updated, None if failed
     """
     cursor = conn.cursor()
 
@@ -324,9 +338,11 @@ def insert_or_update_task(
         query = """
             INSERT INTO tasks (
                 task_id, domain, customer, customer_url,
-                external_links, title, time_passed, price, is_new
+                external_links, title, time_passed, price,
+                description, url, requirements, contacts, deadline,
+                is_new
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 1)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 1)
             ON DUPLICATE KEY UPDATE
                 domain = VALUES(domain),
                 customer = VALUES(customer),
@@ -335,6 +351,11 @@ def insert_or_update_task(
                 title = VALUES(title),
                 time_passed = VALUES(time_passed),
                 price = VALUES(price),
+                description = VALUES(description),
+                url = VALUES(url),
+                requirements = VALUES(requirements),
+                contacts = VALUES(contacts),
+                deadline = VALUES(deadline),
                 is_new = 0,
                 updated_at = CURRENT_TIMESTAMP
         """
@@ -350,22 +371,28 @@ def insert_or_update_task(
                 task["title"],
                 task["time_passed"],
                 task["price"],
+                task.get("description"),
+                task.get("url"),
+                task.get("requirements"),
+                task.get("contacts"),
+                task.get("deadline"),
             ),
         )
 
         conn.commit()
 
-        if cursor.rowcount == 1:
+        is_new = cursor.rowcount == 1
+        if is_new:
             logger.debug(f"Inserted new task {task['task_id']}")
         else:
             logger.debug(f"Updated existing task {task['task_id']}")
 
-        return True
+        return is_new
 
     except mysql.connector.Error as e:
         logger.error(f"Failed to insert/update task {task['task_id']}: {e}")
         conn.rollback()
-        return False
+        return None
 
     finally:
         cursor.close()
@@ -878,6 +905,155 @@ def parse_task_row(row: WebElement, logger: logging.Logger) -> Optional[Dict[str
         return None
 
 
+def parse_task_details(
+    driver: webdriver.Chrome, task_id: int, logger: logging.Logger
+) -> Dict[str, Any]:
+    """Parse task details from AJAX modal.
+
+    Opens the detail modal for a task via JavaScript, extracts additional
+    fields (description, url, requirements, contacts, deadline), then
+    closes the modal.
+
+    Args:
+        driver: Chrome WebDriver
+        task_id: Task ID to fetch details for
+        logger: Logger instance
+
+    Returns:
+        Dictionary with detail fields (may be partially empty)
+    """
+    details: Dict[str, Any] = {
+        "description": None,
+        "url": None,
+        "requirements": None,
+        "contacts": None,
+        "deadline": None,
+    }
+
+    try:
+        # Open detail modal via direct URL in JavaScript
+        detail_url = TASK_DETAIL_URL.format(task_id)
+        logger.debug(f"Opening detail modal for task {task_id}: {detail_url}")
+
+        # Use jQuery modal if available, otherwise fetch via JS
+        driver.execute_script(
+            f"$.get('{detail_url}', function(data) {{"
+            f"  $('<div>').html(data).appendTo('body').modal();"
+            f"}});"
+        )
+
+        # Wait for modal to appear
+        wait = WebDriverWait(driver, PAGE_LOAD_TIMEOUT)
+        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, SELECTOR_MODAL)))
+
+        # Small delay for content to render
+        time.sleep(0.5)
+
+        # Get modal content
+        modal = driver.find_element(By.CSS_SELECTOR, SELECTOR_MODAL_CONTENT)
+        modal_html = modal.get_attribute("innerHTML") or ""
+
+        # Parse fields from modal content
+        # Description: typically in a div or paragraph
+        try:
+            desc_elements = modal.find_elements(By.CSS_SELECTOR, "p, .description, .task-description")
+            if len(desc_elements) > 0:
+                description_parts = []
+                for elem in desc_elements:
+                    text = sanitize_text(elem.text)
+                    if len(text) > 0:
+                        description_parts.append(text)
+                if len(description_parts) > 0:
+                    details["description"] = "\n".join(description_parts)
+        except NoSuchElementException:
+            pass
+
+        # URL: look for links in modal
+        try:
+            url_elements = modal.find_elements(By.CSS_SELECTOR, "a[href*='http']")
+            for url_elem in url_elements:
+                href = url_elem.get_attribute("href") or ""
+                # Skip gogetlinks.net internal links
+                parsed = urlparse(href)
+                if parsed.netloc and "gogetlinks.net" not in parsed.netloc:
+                    details["url"] = href
+                    break
+        except NoSuchElementException:
+            pass
+
+        # Try to extract structured data from table rows or dt/dd pairs
+        try:
+            rows = modal.find_elements(By.CSS_SELECTOR, "tr, .field-row")
+            for row in rows:
+                row_text = row.text.lower()
+                row_content = sanitize_text(row.text)
+
+                if "требовани" in row_text or "requirement" in row_text:
+                    # Get value part (after label)
+                    parts = row_content.split(":", 1)
+                    if len(parts) > 1:
+                        details["requirements"] = parts[1].strip()
+
+                elif "контакт" in row_text or "contact" in row_text:
+                    parts = row_content.split(":", 1)
+                    if len(parts) > 1:
+                        details["contacts"] = parts[1].strip()
+
+                elif "срок" in row_text or "deadline" in row_text:
+                    parts = row_content.split(":", 1)
+                    if len(parts) > 1:
+                        details["deadline"] = parts[1].strip()
+
+                elif "url" in row_text or "ссылк" in row_text:
+                    parts = row_content.split(":", 1)
+                    if len(parts) > 1:
+                        url_text = parts[1].strip()
+                        if url_text and details["url"] is None:
+                            details["url"] = url_text
+        except NoSuchElementException:
+            pass
+
+        # Fallback: extract all text as description if nothing found
+        if details["description"] is None:
+            full_text = sanitize_text(modal.text)
+            if len(full_text) > 10:
+                details["description"] = full_text
+
+        logger.debug(
+            f"Task {task_id} details: "
+            f"desc={'yes' if details['description'] else 'no'}, "
+            f"url={'yes' if details['url'] else 'no'}, "
+            f"req={'yes' if details['requirements'] else 'no'}"
+        )
+
+    except TimeoutException:
+        logger.warning(f"Timeout opening detail modal for task {task_id}")
+
+    except Exception as e:
+        logger.warning(f"Failed to parse details for task {task_id}: {e}")
+
+    finally:
+        # Close modal
+        try:
+            close_buttons = driver.find_elements(
+                By.CSS_SELECTOR, SELECTOR_MODAL_CLOSE
+            )
+            for btn in close_buttons:
+                try:
+                    btn.click()
+                except Exception:
+                    pass
+            # Also try closing via JavaScript
+            driver.execute_script("$.modal.close();")
+        except Exception:
+            pass
+
+        # Rate limiting
+        time.sleep(DETAIL_REQUEST_DELAY)
+
+    return details
+
+
 def parse_task_list(driver: webdriver.Chrome, logger: logging.Logger) -> List[Dict[str, Any]]:
     """Parse all tasks from task list page.
 
@@ -911,7 +1087,17 @@ def parse_task_list(driver: webdriver.Chrome, logger: logging.Logger) -> List[Di
             if task:
                 tasks.append(task)
 
-        logger.info(f"Successfully parsed {len(tasks)} tasks")
+        logger.info(f"Successfully parsed {len(tasks)} tasks from list")
+
+        # Parse details for each task
+        if len(tasks) > 0:
+            logger.info(f"Parsing details for {len(tasks)} tasks")
+            for task in tasks:
+                details = parse_task_details(driver, task["task_id"], logger)
+                task.update(details)
+
+            logger.info("Detail parsing completed")
+
         return tasks
 
     except TimeoutException:
@@ -972,6 +1158,115 @@ def print_tasks(tasks: List[Dict[str, Any]], enabled: bool) -> None:
     """
     if enabled:
         print("\n" + format_tasks_table(tasks) + "\n")
+
+
+# =============================================================================
+# TELEGRAM NOTIFICATIONS
+# =============================================================================
+
+TELEGRAM_API_URL = "https://api.telegram.org/bot{}/sendMessage"
+TELEGRAM_MAX_MESSAGE_LENGTH = 4096
+
+
+def format_telegram_message(tasks: List[Dict[str, Any]]) -> str:
+    """Format list of new tasks as Telegram HTML message.
+
+    Args:
+        tasks: List of new task dictionaries
+
+    Returns:
+        HTML-formatted message string
+    """
+    lines = [f"<b>🔔 Новые задачи GoGetLinks ({len(tasks)})</b>\n"]
+
+    for task in tasks:
+        price_str = f"${task['price']:.2f}" if task.get("price") else "N/A"
+        domain = html.escape(task.get("domain", "—"))
+        title = html.escape(task.get("title", "—"))
+        customer = html.escape(task.get("customer", "—"))
+
+        task_line = (
+            f"<b>{title}</b>\n"
+            f"  💰 {price_str} | 🌐 {domain}\n"
+            f"  👤 {customer}"
+        )
+
+        if task.get("description"):
+            desc = html.escape(task["description"][:200])
+            task_line += f"\n  📝 {desc}"
+
+        if task.get("url"):
+            url = html.escape(task["url"])
+            task_line += f"\n  🔗 {url}"
+
+        lines.append(task_line)
+
+    message = "\n\n".join(lines)
+
+    # Truncate if too long
+    if len(message) > TELEGRAM_MAX_MESSAGE_LENGTH:
+        message = message[: TELEGRAM_MAX_MESSAGE_LENGTH - 20] + "\n\n<i>...обрезано</i>"
+
+    return message
+
+
+def send_telegram_notification(
+    tasks: List[Dict[str, Any]],
+    config: Dict[str, Any],
+    logger: logging.Logger,
+) -> bool:
+    """Send Telegram notification about new tasks.
+
+    Args:
+        tasks: List of new task dictionaries
+        config: Telegram configuration (bot_token, chat_id)
+        logger: Logger instance
+
+    Returns:
+        True if message sent successfully, False otherwise
+    """
+    telegram_config = config["telegram"]
+
+    if not telegram_config.get("enabled"):
+        logger.debug("Telegram notifications disabled")
+        return False
+
+    bot_token = telegram_config.get("bot_token", "")
+    chat_id = telegram_config.get("chat_id", "")
+
+    if not bot_token or not chat_id:
+        logger.warning("Telegram bot_token or chat_id not configured")
+        return False
+
+    if len(tasks) == 0:
+        logger.debug("No new tasks to notify about")
+        return False
+
+    message = format_telegram_message(tasks)
+    url = TELEGRAM_API_URL.format(bot_token)
+
+    payload = {
+        "chat_id": chat_id,
+        "text": message,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }
+
+    try:
+        response = requests.post(url, json=payload, timeout=30)
+        response.raise_for_status()
+
+        result = response.json()
+        if result.get("ok"):
+            logger.info(f"Telegram notification sent: {len(tasks)} new tasks")
+            return True
+        else:
+            logger.error(f"Telegram API error: {result.get('description')}")
+            return False
+
+    except requests.RequestException as e:
+        logger.error(f"Failed to send Telegram notification: {e}")
+        return False
 
 
 # =============================================================================
@@ -1048,13 +1343,24 @@ def main() -> int:
         # 7. Save tasks to database
         logger.info(f"Saving {len(tasks)} tasks to database")
         success_count = 0
+        new_tasks = []
         for task in tasks:
-            if insert_or_update_task(conn, task, logger):
+            result = insert_or_update_task(conn, task, logger)
+            if result is not None:
                 success_count += 1
+                if result is True:
+                    new_tasks.append(task)
 
-        logger.info(f"Successfully saved {success_count}/{len(tasks)} tasks")
+        logger.info(
+            f"Successfully saved {success_count}/{len(tasks)} tasks "
+            f"({len(new_tasks)} new)"
+        )
 
-        # 8. Print output (if enabled)
+        # 8. Send Telegram notification for new tasks
+        if len(new_tasks) > 0:
+            send_telegram_notification(new_tasks, config, logger)
+
+        # 9. Print output (if enabled)
         print_tasks(tasks, config["output"]["print_to_console"])
 
         logger.info("Parsing completed successfully")

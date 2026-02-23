@@ -67,6 +67,7 @@ def sample_task_row():
     cells[1].find_element.return_value.text = "Test Client"  # customer
     cells[1].find_element.return_value.get_attribute.return_value = "https://gogetlinks.net/client/123"
     cells[2].text = "5"  # external_links
+    cells[3].find_element.return_value.text = "Test Task Title"  # title
     cells[4].text = "2 часа назад"  # time_passed
     cells[5].text = "$50.00"  # price
 
