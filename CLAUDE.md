@@ -64,4 +64,4 @@ Detailed rules live in `.claude/rules/` (coding-style, git-workflow, testing, se
 - `insert_or_update_task()` returns `Optional[bool]`: `True`=new, `False`=updated, `None`=error
 - Telegram section in config is optional (fallback defaults if missing)
 - Session cookies saved to `session_cookies.pkl` (gitignored, chmod 600) — stale file auto-deleted on expired session
-- Tests: 64 tests with real assertions (parser, details, telegram, html cleaning, cookie session)
+- Tests: 72 tests with real assertions (parser, details, telegram, html cleaning, cookie session, db)
