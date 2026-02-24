@@ -322,6 +322,31 @@ def task_exists(conn: MySQLConnection, task_id: int) -> bool:
         cursor.close()
 
 
+def task_has_details(conn: MySQLConnection, task_id: int) -> bool:
+    """Check if task already has details parsed in database.
+
+    Used to skip re-fetching detail modals for tasks that were
+    already fully parsed in a previous run.
+
+    Args:
+        conn: MySQL connection
+        task_id: Task ID to check
+
+    Returns:
+        True if task exists and has non-empty description
+    """
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "SELECT 1 FROM tasks WHERE task_id = %s"
+            " AND description IS NOT NULL AND description != '' LIMIT 1",
+            (task_id,),
+        )
+        return cursor.fetchone() is not None
+    finally:
+        cursor.close()
+
+
 def insert_or_update_task(
     conn: MySQLConnection, task: Dict[str, Any], logger: logging.Logger
 ) -> Optional[bool]:
@@ -1162,12 +1187,18 @@ def parse_task_details(
     return details
 
 
-def parse_task_list(driver: webdriver.Chrome, logger: logging.Logger) -> List[Dict[str, Any]]:
+def parse_task_list(
+    driver: webdriver.Chrome,
+    logger: logging.Logger,
+    conn: Optional[MySQLConnection] = None,
+) -> List[Dict[str, Any]]:
     """Parse all tasks from task list page.
 
     Args:
         driver: Chrome WebDriver
         logger: Logger instance
+        conn: Optional MySQL connection. When provided, detail modals are
+            skipped for tasks that already have a description in the database.
 
     Returns:
         List of task dictionaries
@@ -1197,12 +1228,22 @@ def parse_task_list(driver: webdriver.Chrome, logger: logging.Logger) -> List[Di
 
         logger.info(f"Successfully parsed {len(tasks)} tasks from list")
 
-        # Parse details for each task
+        # Parse details for each task (skip tasks already in DB with details)
         if len(tasks) > 0:
-            logger.info(f"Parsing details for {len(tasks)} tasks")
-            for task in tasks:
-                details = parse_task_details(driver, task["task_id"], logger)
-                task.update(details)
+            tasks_to_fetch = [
+                t for t in tasks
+                if conn is None or not task_has_details(conn, t["task_id"])
+            ]
+            skipped = len(tasks) - len(tasks_to_fetch)
+            if skipped > 0:
+                logger.info(
+                    f"Skipping detail fetch for {skipped} already-parsed tasks"
+                )
+            if len(tasks_to_fetch) > 0:
+                logger.info(f"Parsing details for {len(tasks_to_fetch)} tasks")
+                for task in tasks_to_fetch:
+                    details = parse_task_details(driver, task["task_id"], logger)
+                    task.update(details)
 
             logger.info("Detail parsing completed")
 
@@ -1447,7 +1488,7 @@ def main() -> int:
             save_cookies(driver, logger)
 
         # 6. Parse task list
-        tasks = parse_task_list(driver, logger)
+        tasks = parse_task_list(driver, logger, conn)
 
         if not tasks:
             logger.warning("No tasks parsed")

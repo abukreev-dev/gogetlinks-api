@@ -2,6 +2,68 @@
 Тесты модуля базы данных
 """
 import pytest
+from unittest.mock import Mock, call
+from gogetlinks_parser import task_has_details
+
+
+class TestTaskHasDetails:
+    """Тесты функции task_has_details"""
+
+    def _make_conn(self, fetchone_result):
+        """Хелпер: мок соединения с заданным результатом fetchone."""
+        cursor = Mock()
+        cursor.fetchone.return_value = fetchone_result
+        conn = Mock()
+        conn.cursor.return_value = cursor
+        return conn, cursor
+
+    def test_returns_true_when_description_exists(self):
+        """Задача с описанием → True (пропускаем модалку)."""
+        conn, cursor = self._make_conn((1,))
+
+        result = task_has_details(conn, 12345)
+
+        assert result is True
+        cursor.execute.assert_called_once()
+        cursor.close.assert_called_once()
+
+    def test_returns_false_when_no_description(self):
+        """Задача без описания (новая) → False (парсим модалку)."""
+        conn, cursor = self._make_conn(None)
+
+        result = task_has_details(conn, 99999)
+
+        assert result is False
+
+    def test_returns_false_when_task_not_in_db(self):
+        """Задача не в БД → False (парсим модалку)."""
+        conn, cursor = self._make_conn(None)
+
+        result = task_has_details(conn, 00000)
+
+        assert result is False
+
+    def test_cursor_closed_on_success(self):
+        """Курсор закрывается даже при успешном результате."""
+        conn, cursor = self._make_conn((1,))
+        task_has_details(conn, 12345)
+        cursor.close.assert_called_once()
+
+    def test_cursor_closed_on_miss(self):
+        """Курсор закрывается когда задача не найдена."""
+        conn, cursor = self._make_conn(None)
+        task_has_details(conn, 12345)
+        cursor.close.assert_called_once()
+
+    def test_query_uses_parameterized_placeholder(self):
+        """SQL запрос использует параметризованный placeholder."""
+        conn, cursor = self._make_conn(None)
+        task_has_details(conn, 42)
+        args = cursor.execute.call_args
+        # Первый аргумент — SQL строка, второй — параметры
+        sql, params = args[0]
+        assert "%s" in sql
+        assert params == (42,)
 
 
 class TestDatabaseOperations:
