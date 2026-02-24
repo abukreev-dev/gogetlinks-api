@@ -36,6 +36,8 @@ class TestPriceParser:
         ("$0.00", Decimal("0.00")),
         ("1000", Decimal("1000")),
         ("99.99 руб", Decimal("99.99")),
+        ("500 Р", Decimal("500")),    # uppercase Cyrillic Р (U+0420) from gogetlinks
+        ("0 Р", Decimal("0")),        # zero price with uppercase Р
     ])
     def test_parse_price_robust(self, input_price, expected):
         """Тест парсинга различных форматов цен."""

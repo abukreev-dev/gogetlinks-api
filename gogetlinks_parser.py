@@ -842,8 +842,8 @@ def parse_price(text: str) -> Decimal:
     if not text or text.strip().upper() in ("FREE", "N/A", ""):
         return Decimal("0.00")
 
-    # Remove currency symbols and whitespace
-    cleaned = re.sub(r"[$€£¥₽руб\s]", "", text)
+    # Remove currency symbols and whitespace (case-insensitive for Cyrillic: Р/р, У/у, Б/б)
+    cleaned = re.sub(r"[$€£¥₽руб\s]", "", text, flags=re.IGNORECASE)
 
     # Remove commas (thousand separators)
     cleaned = cleaned.replace(",", "")
@@ -963,6 +963,7 @@ def parse_task_row(row: WebElement, logger: logging.Logger) -> Optional[Dict[str
 
         # Cell 5: Price
         price_text = sanitize_text(cells[5].text)
+        logger.debug(f"Task {task_id} price_text raw: {repr(price_text)}")
         price = parse_price(price_text)
 
         task = {
