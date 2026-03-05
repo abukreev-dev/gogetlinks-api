@@ -51,14 +51,14 @@ sudo mysql_secure_installation
 ```bash
 # Create database and user
 sudo mysql -u root -p << 'SQL'
-CREATE DATABASE gogetlinks CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE DATABASE ddl CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 CREATE USER 'gogetlinks_parser'@'localhost' IDENTIFIED BY 'STRONG_PASSWORD';
-GRANT SELECT, INSERT, UPDATE ON gogetlinks.* TO 'gogetlinks_parser'@'localhost';
+GRANT SELECT, INSERT, UPDATE ON ddl.* TO 'gogetlinks_parser'@'localhost';
 FLUSH PRIVILEGES;
 SQL
 
 # Create schema
-mysql -u gogetlinks_parser -p gogetlinks < schema.sql
+mysql -u gogetlinks_parser -p ddl < schema.sql
 ```
 
 #### Step 3: Code Deployment (5 minutes)
@@ -100,7 +100,7 @@ api_key = your_anticaptcha_key
 [database]
 host = localhost
 port = 3306
-database = gogetlinks
+database = ddl
 user = gogetlinks_parser
 password = STRONG_PASSWORD
 
@@ -112,8 +112,11 @@ log_level = INFO
 log_file = logs/gogetlinks_parser.log
 
 [telegram]
+# Notifications for new tasks and site status changes (optional)
+enabled = true
 bot_token = your_bot_token
 chat_id = your_chat_id
+# Mentions are applied only to new-task notifications
 mention = @user1 @user2
 ```
 
@@ -129,7 +132,7 @@ python gogetlinks_parser.py
 tail -f logs/gogetlinks_parser.log
 
 # Verify database
-mysql -u gogetlinks_parser -p gogetlinks -e "SELECT COUNT(*) FROM tasks;"
+mysql -u gogetlinks_parser -p ddl -e "SELECT COUNT(*) FROM ddl.ggl_tasks;"
 ```
 
 #### Step 6: Cron Setup (5 minutes)
@@ -137,8 +140,10 @@ mysql -u gogetlinks_parser -p gogetlinks -e "SELECT COUNT(*) FROM tasks;"
 # Edit crontab
 crontab -e
 
-# Add hourly job
-0 * * * * cd /home/user/gogetlinks-api && /home/user/gogetlinks-api/venv/bin/python gogetlinks_parser.py >> /var/log/gogetlinks_cron.log 2>&1
+# Add schedule (Moscow time)
+CRON_TZ=Europe/Moscow
+0 * * * * cd /home/user/gogetlinks-api && /home/user/gogetlinks-api/venv/bin/python gogetlinks_parser.py --skip-sites >> /var/log/gogetlinks_cron.log 2>&1
+15 7 * * * cd /home/user/gogetlinks-api && /home/user/gogetlinks-api/venv/bin/python gogetlinks_parser.py --skip-tasks >> /var/log/gogetlinks_cron.log 2>&1
 
 # Verify cron is active
 crontab -l
@@ -157,14 +162,14 @@ crontab -l
 crontab -r
 
 # 2. Backup current database
-mysqldump -u gogetlinks_parser -p gogetlinks > rollback_backup_$(date +%Y%m%d).sql
+mysqldump -u gogetlinks_parser -p ddl > rollback_backup_$(date +%Y%m%d).sql
 
 # 3. Revert code to last stable version
 cd ~/gogetlinks-api
 git checkout tags/v1.0  # Or specific commit
 
 # 4. Restore database from backup (if needed)
-mysql -u gogetlinks_parser -p gogetlinks < backup.sql
+mysql -u gogetlinks_parser -p ddl < backup.sql
 
 # 5. Re-enable cron with corrected schedule
 crontab -e
@@ -212,13 +217,10 @@ def send_alert(subject, body):
     # - No successful run in 12 hours
 ```
 
-**Telegram Bot (Future):**
-```python
-def send_telegram_alert(message):
-    import requests
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    requests.post(url, json={"chat_id": CHAT_ID, "text": message})
-```
+**Telegram Notifications (Implemented in v1.3):**
+- New task notifications from `/webTask` (supports `mention`)
+- Site status-change notifications from `/mySites` (without mentions)
+- Both use the same bot and chat from `[telegram]` in `config.ini`
 
 ## CI/CD Pipeline (Future Enhancement)
 
@@ -259,7 +261,7 @@ jobs:
             git pull origin main
             source venv/bin/activate
             pip install -r requirements.txt
-            python gogetlinks_parser.py --test
+            python gogetlinks_parser.py --skip-sites
 ```
 
 ## Handoff Documentation
@@ -300,14 +302,14 @@ gogetlinks-api/
 2. Write tests for new code
 3. Update documentation
 4. Create PR with description
-5. Tag release after merge: `git tag v1.1.0`
+5. Tag release after merge: `git tag v1.3.0`
 
 ### For QA Team
 
 **Test Environment Setup:**
 ```bash
 # Use separate database
-CREATE DATABASE gogetlinks_test;
+CREATE DATABASE ddl_test;
 
 # Use config_test.ini with test credentials
 cp config.ini config_test.ini
@@ -323,6 +325,6 @@ cp config.ini config_test.ini
 
 ---
 
-**Deployment Version:** 1.0  
+**Deployment Version:** 1.3  
 **Estimated Deployment Time:** 40 minutes  
 **Rollback Time:** 10 minutes

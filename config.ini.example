@@ -21,13 +21,13 @@ user = gogetlinks_parser
 password = your_db_password
 
 [telegram]
-# Telegram-уведомления о новых задачах
+# Telegram-уведомления о новых задачах и смене статусов сайтов
 # Создайте бота через @BotFather и получите токен
 # Добавьте бота в групповой чат и получите chat_id
 enabled = false
 bot_token = 123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
 chat_id = -100123456789
-# Кого тегать в уведомлениях (через пробел, например: @user1 @user2)
+# Кого тегать в уведомлениях о новых задачах (через пробел, например: @user1 @user2)
 mention =
 
 [output]

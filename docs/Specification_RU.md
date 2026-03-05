@@ -154,7 +154,7 @@ Feature: Task Storage
     And the task_id does not exist in database
     When the parser inserts the task
     Then it should execute:
-         INSERT INTO tasks (task_id, title, ..., is_new, created_at)
+         INSERT INTO ddl.ggl_tasks (task_id, title, ..., is_new, created_at)
          VALUES (?, ?, ..., 1, NOW())
     And it should log "Inserted new task: {task_id}"
 
@@ -227,7 +227,7 @@ api_key = your_anticaptcha_api_key
 [database]
 host = localhost
 port = 3306
-database = gogetlinks
+database = ddl
 user = root
 password = db_password
 
@@ -362,8 +362,8 @@ Feature: Logging
 
 **Критерии приемки:**
 - Описание, требования и контакты хранятся в базе данных
-- Я могу запрашивать по диапазону цен: `SELECT * FROM tasks WHERE price > 50 AND is_new = 1`
-- Я могу запрашивать по заказчику: `SELECT * FROM tasks WHERE customer = 'Client A'`
+- Я могу запрашивать по диапазону цен: `SELECT * FROM ddl.ggl_tasks WHERE price > 50 AND is_new = 1`
+- Я могу запрашивать по заказчику: `SELECT * FROM ddl.ggl_tasks WHERE customer = 'Client A'`
 
 ### История 3: Историческое отслеживание
 **Как** фриланс-разработчик

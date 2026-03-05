@@ -1,6 +1,6 @@
 # Gogetlinks Task Parser
 
-Автоматизированный парсер заданий с биржи фриланса gogetlinks.net. Система работает автономно по расписанию cron, извлекает данные о новых задачах через browser automation (Selenium), решает капчи через anti-captcha.com, и хранит данные в MySQL с автоматической дедупликацией.
+Автоматизированный парсер биржи gogetlinks.net. Скрипт работает по cron, собирает новые задачи (`/webTask`) и метрики по сайтам (`/mySites`), решает reCAPTCHA через anti-captcha.com и сохраняет данные в MySQL.
 
 ## 🚀 Быстрый старт
 
@@ -37,10 +37,12 @@ make run
 ### Настройка cron
 
 ```bash
-make setup-cron  # Покажет строку для добавления в crontab
+make setup-cron  # Покажет готовые строки для crontab
 crontab -e
-# Добавить строку для запуска каждый час:
-0 * * * * cd ~/gogetlinks-api && venv/bin/python gogetlinks_parser.py >> /var/log/gogetlinks_cron.log 2>&1
+# Добавить:
+CRON_TZ=Europe/Moscow
+0 * * * * cd ~/gogetlinks-api && venv/bin/python gogetlinks_parser.py --skip-sites >> /var/log/gogetlinks_cron.log 2>&1
+15 7 * * * cd ~/gogetlinks-api && venv/bin/python gogetlinks_parser.py --skip-tasks >> /var/log/gogetlinks_cron.log 2>&1
 ```
 
 ## 📚 Документация
@@ -93,6 +95,7 @@ password = db_password
 enabled = false
 bot_token = 123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
 chat_id = -100123456789
+# Упоминания применяются только к уведомлениям о новых задачах (/webTask)
 mention = @user1 @user2
 
 [output]
@@ -122,13 +125,21 @@ log_file = logs/gogetlinks_parser.log
 - ✅ Сохранение cookie сессии для пропуска повторной авторизации
 - ✅ 64 теста с assertions
 
-### v1.2.1 (patch)
+### v1.2.1
 - ✅ Фикс парсинга цены: заглавная кириллическая `Р` (U+0420) теперь корректно удаляется (`re.IGNORECASE`)
 - ✅ Пропуск AJAX-модалок для задач, уже имеющих `description` в БД (~10× быстрее при повторных запусках)
 - ✅ 72 теста с assertions
 
-### Планируемые (v1.3)
-- 🔄 Пагинация списка задач
+### v1.3 (текущая)
+- ✅ Переезд на `ddl.ggl_tasks` (без создания БД в `schema.sql`)
+- ✅ Парсинг `/mySites` и обновление метрик в `ddl.domain`
+- ✅ Обход всех страниц `/mySites` (а не только первой)
+- ✅ Telegram-уведомления о смене `ggl_status` (без `mention`)
+- ✅ Fallback авторизации: direct -> proxy `127.0.0.1:3128` при anti-bot блоке
+- ✅ Разделённые режимы запуска: `--skip-sites` и `--skip-tasks`
+- ✅ 77 тестов с assertions
+
+### Планируемые (v1.4)
 - 🔄 Фильтрация задач по критериям
 - 🔄 Web панель управления (Flask)
 
@@ -159,6 +170,9 @@ CREATE TABLE ddl.ggl_tasks (
     INDEX idx_is_new (is_new)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 ```
+
+Также скрипт обновляет существующие записи в `ddl.domain` по полю `host`:
+`ggl_status`, `ggl_description`, `ggl_traffic`, `ggl_sqi`, `ggl_cf_tf`, `ggl_trust`, `ggl_update_at`.
 
 ## 🛠️ Makefile команды
 
@@ -199,7 +213,7 @@ CREATE TABLE ddl.ggl_tasks (
 | `make logs-errors` | Только ошибки из лога |
 | `make db-tasks` | Новые задачи из БД (последние 10) |
 | `make deploy-check` | Проверить готовность к деплою (Python, Chrome, MySQL, файлы) |
-| `make setup-cron` | Показать строку для crontab |
+| `make setup-cron` | Показать две cron-задачи (hourly tasks + daily mySites) |
 | `make backup-db` | Создать timestamped дамп БД |
 | `make clean` | Очистить кеши (__pycache__, .pytest_cache и т.д.) |
 | `make clean-all` | Полная очистка включая venv |
@@ -230,6 +244,7 @@ make db-tasks       # Новые задачи в БД
 | "Captcha solving failed" | Проверить баланс anti-captcha (>$5) |
 | "Database error" | Проверить MySQL: `sudo systemctl status mysql` |
 | Пустой список задач | Возможно изменился макет сайта, обновить селекторы |
+| Перекидывает на `/403.php` | Настроить локальный proxy `127.0.0.1:3128` (fallback используется автоматически) |
 | Cron не запускается | Проверить `crontab -l` и логи `/var/log/gogetlinks_cron.log` |
 
 ## 📈 Метрики производительности
@@ -267,6 +282,6 @@ Contributions приветствуются! Пожалуйста:
 
 ---
 
-**Статус:** ✅ v1.2.1 — фикс цен + оптимизация модалок + 72 теста
-**Версия:** 1.2.1
-**Последнее обновление:** 2026-02-24
+**Статус:** ✅ v1.3 — mySites + статус-уведомления + split-schedule + 77 тестов
+**Версия:** 1.3
+**Последнее обновление:** 2026-03-05

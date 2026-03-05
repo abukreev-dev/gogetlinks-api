@@ -208,7 +208,7 @@ class TaskDatabase:
 **Схема базы данных (DDL):**
 
 ```sql
-CREATE TABLE tasks (
+CREATE TABLE ddl.ggl_tasks (
     id INT AUTO_INCREMENT PRIMARY KEY,
     task_id INT UNIQUE NOT NULL,
     title VARCHAR(500),
@@ -250,7 +250,7 @@ api_key = your_api_key_here
 [database]
 host = localhost
 port = 3306
-database = gogetlinks
+database = ddl
 user = root
 password = db_password
 
@@ -510,7 +510,7 @@ echo $?
 - Создать выделенного пользователя MySQL с ограниченными правами
 ```sql
 CREATE USER 'gogetlinks_parser'@'localhost' IDENTIFIED BY 'strong_password';
-GRANT SELECT, INSERT, UPDATE ON gogetlinks.* TO 'gogetlinks_parser'@'localhost';
+GRANT SELECT, INSERT, UPDATE ON ddl.* TO 'gogetlinks_parser'@'localhost';
 FLUSH PRIVILEGES;
 ```
 

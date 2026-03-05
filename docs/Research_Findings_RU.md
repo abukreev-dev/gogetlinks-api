@@ -85,7 +85,7 @@ driver.execute_script(
 **Ключевые идеи:**
 1. **Метод UNIQUE INDEX:** Наиболее эффективен для точных дубликатов
 ```sql
-CREATE UNIQUE INDEX idx_task_id ON tasks(task_id);
+CREATE UNIQUE INDEX idx_task_id ON ddl.ggl_tasks(task_id);
 INSERT ... ON DUPLICATE KEY UPDATE ...
 ```
 2. **Производительность:** UNIQUE ограничение проверяется во время вставки (поиск O(log n))
@@ -210,11 +210,11 @@ time.sleep(5)  # Избегайте этого
 ### 3. Дедупликация в базе данных
 ```sql
 -- ХОРОШО: Атомарный upsert
-INSERT INTO tasks (task_id, price, ...) VALUES (123, 50.00, ...)
+INSERT INTO ddl.ggl_tasks (task_id, price, ...) VALUES (123, 50.00, ...)
 ON DUPLICATE KEY UPDATE price = VALUES(price), updated_at = NOW();
 
 -- ПЛОХО: Проверить затем вставить (состояние гонки)
-SELECT task_id FROM tasks WHERE task_id = 123;
+SELECT task_id FROM ddl.ggl_tasks WHERE task_id = 123;
 IF NOT EXISTS: INSERT ...
 ```
 

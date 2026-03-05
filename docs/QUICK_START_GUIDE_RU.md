@@ -92,11 +92,15 @@ nano config.ini
 - `[anticaptcha]` - API ключ от anti-captcha.com
 - `[database]` - настройки MySQL
 - `[telegram]` - (опционально) bot_token, chat_id, mention для уведомлений
+  (`mention` используется только для новых задач)
 
 #### Шаг 3: Инициализация базы данных
 
 ```bash
-# Создать базу данных
+# Важно: база ddl должна существовать заранее
+mysql -u root -p -e "CREATE DATABASE IF NOT EXISTS ddl CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+
+# Применить схему (создаёт ddl.ggl_tasks)
 mysql -u root -p < schema.sql
 
 # Или через make
@@ -111,6 +115,19 @@ pytest tests/
 
 # Запустить парсер
 python gogetlinks_parser.py
+```
+
+#### Шаг 5: Режимы запуска по расписанию
+
+```bash
+# Только задачи (/webTask)
+python gogetlinks_parser.py --skip-sites
+
+# Только сайты (/mySites)
+python gogetlinks_parser.py --skip-tasks
+
+# Показать готовые строки для cron
+make setup-cron
 ```
 
 ---

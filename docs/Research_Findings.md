@@ -85,7 +85,7 @@ driver.execute_script(
 **Key Insights:**
 1. **UNIQUE INDEX Method:** Most efficient for exact duplicates
 ```sql
-CREATE UNIQUE INDEX idx_task_id ON tasks(task_id);
+CREATE UNIQUE INDEX idx_task_id ON ddl.ggl_tasks(task_id);
 INSERT ... ON DUPLICATE KEY UPDATE ...
 ```
 2. **Performance:** UNIQUE constraint checked at insert time (O(log n) lookup)
@@ -210,11 +210,11 @@ time.sleep(5)  # Avoid this
 ### 3. Database Deduplication
 ```sql
 -- GOOD: Atomic upsert
-INSERT INTO tasks (task_id, price, ...) VALUES (123, 50.00, ...)
+INSERT INTO ddl.ggl_tasks (task_id, price, ...) VALUES (123, 50.00, ...)
 ON DUPLICATE KEY UPDATE price = VALUES(price), updated_at = NOW();
 
 -- BAD: Check then insert (race condition)
-SELECT task_id FROM tasks WHERE task_id = 123;
+SELECT task_id FROM ddl.ggl_tasks WHERE task_id = 123;
 IF NOT EXISTS: INSERT ...
 ```
 

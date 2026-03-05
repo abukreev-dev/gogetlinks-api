@@ -158,7 +158,7 @@ python gogetlinks_parser.py
 
 **Command:** Query new tasks
 ```sql
-SELECT * FROM tasks WHERE is_new = 1 ORDER BY created_at DESC;
+SELECT * FROM ddl.ggl_tasks WHERE is_new = 1 ORDER BY created_at DESC;
 ```
 
 **Command:** Check logs

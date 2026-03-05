@@ -54,14 +54,14 @@ sudo mysql_secure_installation
 ```bash
 # Создание базы данных и пользователя
 sudo mysql -u root -p << 'SQL'
-CREATE DATABASE gogetlinks CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE DATABASE ddl CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 CREATE USER 'gogetlinks_parser'@'localhost' IDENTIFIED BY 'STRONG_PASSWORD';
-GRANT SELECT, INSERT, UPDATE ON gogetlinks.* TO 'gogetlinks_parser'@'localhost';
+GRANT SELECT, INSERT, UPDATE ON ddl.* TO 'gogetlinks_parser'@'localhost';
 FLUSH PRIVILEGES;
 SQL
 
 # Создание схемы
-mysql -u gogetlinks_parser -p gogetlinks < schema.sql
+mysql -u gogetlinks_parser -p ddl < schema.sql
 ```
 
 #### Шаг 3: Развертывание кода (5 минут)
@@ -96,16 +96,16 @@ api_key = your_anticaptcha_key
 [database]
 host = localhost
 port = 3306
-database = gogetlinks
+database = ddl
 user = gogetlinks_parser
 password = STRONG_PASSWORD
 
 [telegram]
-# Уведомления о новых задачах (опционально)
+# Уведомления о новых задачах и статусах сайтов (опционально)
 enabled = true
 bot_token = 123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
 chat_id = -100123456789
-# Кого тегать в уведомлениях (через пробел)
+# Кого тегать в уведомлениях о новых задачах (через пробел)
 mention = @user1 @user2
 
 [output]
@@ -141,8 +141,10 @@ make setup-cron
 # Редактирование crontab
 crontab -e
 
-# Добавление ежечасной задачи (пример)
-0 * * * * cd /home/user/gogetlinks-api && /home/user/gogetlinks-api/venv/bin/python gogetlinks_parser.py >> /var/log/gogetlinks_cron.log 2>&1
+# Добавление расписания (MSK)
+CRON_TZ=Europe/Moscow
+0 * * * * cd /home/user/gogetlinks-api && /home/user/gogetlinks-api/venv/bin/python gogetlinks_parser.py --skip-sites >> /var/log/gogetlinks_cron.log 2>&1
+15 7 * * * cd /home/user/gogetlinks-api && /home/user/gogetlinks-api/venv/bin/python gogetlinks_parser.py --skip-tasks >> /var/log/gogetlinks_cron.log 2>&1
 
 # Проверка активности cron
 crontab -l
@@ -161,14 +163,14 @@ crontab -l
 crontab -r
 
 # 2. Резервное копирование текущей базы данных
-mysqldump -u gogetlinks_parser -p gogetlinks > rollback_backup_$(date +%Y%m%d).sql
+mysqldump -u gogetlinks_parser -p ddl > rollback_backup_$(date +%Y%m%d).sql
 
 # 3. Откат кода к последней стабильной версии
 cd ~/gogetlinks-api
 git checkout tags/v1.2  # Или конкретный коммит
 
 # 4. Восстановление базы данных из резервной копии (при необходимости)
-mysql -u gogetlinks_parser -p gogetlinks < backup.sql
+mysql -u gogetlinks_parser -p ddl < backup.sql
 
 # 5. Повторное включение cron с исправленным расписанием
 crontab -e
@@ -216,9 +218,9 @@ def send_alert(subject, body):
     # - Нет успешного запуска в течение 12 часов
 ```
 
-**Telegram уведомления (реализовано в v1.1):**
-Парсер отправляет уведомления о новых задачах в Telegram-чат через Bot API.
-Формат: компактный HTML с типом задачи, ценой и доменами. Поддержка тегов `mention` для оповещения команды.
+**Telegram уведомления (реализовано в v1.3):**
+Парсер отправляет уведомления о новых задачах и о смене статусов сайтов.
+Для новых задач поддерживаются теги `mention`, для статусов сайтов уведомления идут без тегов.
 Настройка в секции `[telegram]` файла `config.ini` (опционально).
 
 ## CI/CD конвейер (будущее улучшение)
@@ -260,7 +262,7 @@ jobs:
             git pull origin main
             source venv/bin/activate
             pip install -r requirements.txt
-            python gogetlinks_parser.py --test
+            python gogetlinks_parser.py --skip-sites
 ```
 
 ## Документация передачи
@@ -322,14 +324,14 @@ gogetlinks-api/
 2. Написать тесты для нового кода
 3. Обновить документацию
 4. Создать PR с описанием
-5. Пометить релиз после слияния: `git tag v1.1.0`
+5. Пометить релиз после слияния: `git tag v1.3.0`
 
 ### Для команды QA
 
 **Настройка тестовой среды:**
 ```bash
 # Использовать отдельную базу данных
-CREATE DATABASE gogetlinks_test;
+CREATE DATABASE ddl_test;
 
 # Использовать config_test.ini с тестовыми учетными данными
 cp config.ini config_test.ini
@@ -345,6 +347,6 @@ cp config.ini config_test.ini
 
 ---
 
-**Версия развертывания:** 1.2
+**Версия развертывания:** 1.3
 **Расчетное время развертывания:** 40 минут
 **Время отката:** 10 минут

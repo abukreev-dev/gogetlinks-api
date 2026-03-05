@@ -79,7 +79,8 @@ cp gogetlinks-parser-cc-toolkit/CLAUDE.md ./
 | Phase | Features | Timeline |
 |-------|----------|----------|
 | **MVP (v1.0)** | Auth + parsing + MySQL | Week 1-2 |
-| **v1.1** | Detail parsing + session persist | Week 3-4 |
+| **v1.1-v1.2** | Detail parsing + Telegram + session persist | Week 3-4 |
+| **v1.3 (current)** | mySites metrics + status alerts + split schedule | Done |
 | **v2.0** | Web dashboard + notifications | Month 2+ |
 
 ---
@@ -127,6 +128,9 @@ A: См. Refinement.md → Edge Cases → "Site layout changes"
 **Q: Как деплоить?**  
 A: См. Completion.md → Deployment Steps
 
+**Q: Как запускать по расписанию?**  
+A: `--skip-sites` для ежечасного поиска задач, `--skip-tasks` для ежедневного сбора `/mySites`.
+
 ---
 
 ## 🎯 Success Metrics
@@ -148,11 +152,11 @@ A: См. Completion.md → Deployment Steps
 
 ---
 
-**Status:** ✅ READY FOR VIBE CODING
+**Status:** ✅ UP TO DATE (v1.3)
 
 Вся документация готова. Все инструменты созданы. Можно начинать разработку!
 
 ---
 
-*Generated: 2026-02-05*  
-*Version: 1.0*
+*Generated: 2026-03-05*  
+*Version: 1.3*

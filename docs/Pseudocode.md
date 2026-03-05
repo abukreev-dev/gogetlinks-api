@@ -397,7 +397,7 @@ END FUNCTION
 ```pseudocode
 FUNCTION insert_task(db: Connection, task: Task) -> None:
     query = """
-        INSERT INTO tasks (
+        INSERT INTO ddl.ggl_tasks (
             task_id, title, description, price, deadline,
             customer, customer_url, domain, url,
             requirements, contacts, external_links,
@@ -477,7 +477,7 @@ FUNCTION update_task(db: Connection, task: Task) -> None:
 END FUNCTION
 
 FUNCTION task_exists_in_db(db: Connection, task_id: Integer) -> Boolean:
-    query = "SELECT 1 FROM tasks WHERE task_id = %s LIMIT 1"
+    query = "SELECT 1 FROM ddl.ggl_tasks WHERE task_id = %s LIMIT 1"
     cursor = db.cursor()
     cursor.execute(query, (task_id,))
     result = cursor.fetchone()

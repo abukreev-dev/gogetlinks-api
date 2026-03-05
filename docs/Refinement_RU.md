@@ -168,7 +168,7 @@ def execute_with_reconnect(cursor, query, values, max_attempts=3):
 **Причина:** Перекрывающиеся расписания cron ИЛИ ручное выполнение
 **Обработка:**
 ```python
-INSERT INTO tasks (...) VALUES (...)
+INSERT INTO ddl.ggl_tasks (...) VALUES (...)
 ON DUPLICATE KEY UPDATE
     updated_at = NOW(),
     is_new = IF(is_new = 1, 1, 0)  -- Сохранить флаг новизны
@@ -316,17 +316,17 @@ def test_database_deduplication():
 
     # Первая вставка
     insert_task(db, task)
-    count1 = db.cursor().execute("SELECT COUNT(*) FROM tasks WHERE task_id=999").fetchone()[0]
+    count1 = db.cursor().execute("SELECT COUNT(*) FROM ddl.ggl_tasks WHERE task_id=999").fetchone()[0]
     assert count1 == 1
 
     # Вторая вставка (должна обновить, а не дублировать)
     task.price = 200
     insert_task(db, task)
-    count2 = db.cursor().execute("SELECT COUNT(*) FROM tasks WHERE task_id=999").fetchone()[0]
+    count2 = db.cursor().execute("SELECT COUNT(*) FROM ddl.ggl_tasks WHERE task_id=999").fetchone()[0]
     assert count2 == 1  # По-прежнему только 1 строка
 
     # Проверить, что цена была обновлена
-    price = db.cursor().execute("SELECT price FROM tasks WHERE task_id=999").fetchone()[0]
+    price = db.cursor().execute("SELECT price FROM ddl.ggl_tasks WHERE task_id=999").fetchone()[0]
     assert price == Decimal("200.00")
 ```
 
@@ -353,7 +353,7 @@ def test_full_parsing_cycle():
 
     # Проверить, что в базе данных есть записи
     db = connect_to_database()
-    count = db.cursor().execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+    count = db.cursor().execute("SELECT COUNT(*) FROM ddl.ggl_tasks").fetchone()[0]
     assert count > 0
 ```
 
@@ -394,7 +394,7 @@ for task in tasks:
 ```python
 def batch_insert_tasks(db, tasks, batch_size=100):
     query = """
-        INSERT INTO tasks (...) VALUES
+        INSERT INTO ddl.ggl_tasks (...) VALUES
     """ + ",".join(["(%s, %s, ...)"] * batch_size) + """
         ON DUPLICATE KEY UPDATE ...
     """
@@ -461,7 +461,7 @@ def save_session_cookies():
 ```python
 def get_last_parsed_timestamp():
     cursor = db.cursor()
-    cursor.execute("SELECT MAX(created_at) FROM tasks")
+    cursor.execute("SELECT MAX(created_at) FROM ddl.ggl_tasks")
     return cursor.fetchone()[0] or datetime.min
 
 def parse_only_new_tasks():

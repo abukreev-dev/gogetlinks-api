@@ -1,5 +1,30 @@
 # Changelog
 
+## 2026-03-05 - v1.3: mySites Metrics + Status Alerts + Split Schedule
+
+### Features
+- ✅ Parsing `/mySites` and updating `ddl.domain` metrics by `host`
+- ✅ Telegram notifications when `ggl_status` changes (same bot/chat, no mentions)
+- ✅ New CLI flag `--skip-tasks` for sites-only runs
+- ✅ Full pagination handling for `/mySites` (all pages)
+
+### Changes
+- Table renamed from `gogetlinks.tasks` to `ddl.ggl_tasks`
+- `schema.sql` no longer creates database; expects existing `ddl`
+- Cron strategy split:
+  - hourly tasks run: `--skip-sites`
+  - morning sites run: `--skip-tasks`
+
+### Bug Fixes
+- Added auth fallback: direct connection first, then local proxy `127.0.0.1:3128` on anti-bot block
+- Removed slow reject-reason scraping from `/mySites` (status only)
+
+### Tests
+- ✅ Updated DB/integration tests for new `save_sites_to_db` return contract
+- ✅ 77 passed, 1 skipped
+
+---
+
 ## 2026-02-23 - v1.1: Detail Parsing + Telegram Notifications
 
 ### Features
