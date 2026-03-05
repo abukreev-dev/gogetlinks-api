@@ -1,9 +1,16 @@
 """
 Тесты модуля базы данных
 """
+import logging
+
+import mysql.connector
 import pytest
 from unittest.mock import Mock, call
-from gogetlinks_parser import task_has_details
+from gogetlinks_parser import (
+    task_has_details,
+    extract_digits_only,
+    save_sites_to_db,
+)
 
 
 class TestTaskHasDetails:
@@ -64,6 +71,102 @@ class TestTaskHasDetails:
         sql, params = args[0]
         assert "%s" in sql
         assert params == (42,)
+
+
+class TestMySitesHelpers:
+    """Тесты helper-функций mySites."""
+
+    def test_extract_digits_only_plain_number(self):
+        assert extract_digits_only("12345") == 12345
+
+    def test_extract_digits_only_with_labels(self):
+        assert extract_digits_only("CF 20 / TF 11") == 2011
+
+    def test_extract_digits_only_empty(self):
+        assert extract_digits_only("N/A") is None
+        assert extract_digits_only("") is None
+
+
+class TestSaveSitesToDb:
+    """Тесты сохранения метрик mySites."""
+
+    def _make_conn(self):
+        conn = Mock()
+        cursor = Mock()
+        conn.cursor.return_value = cursor
+        return conn, cursor
+
+    def test_save_sites_to_db_updates_and_commits(self):
+        logger = logging.getLogger("test")
+        conn, cursor = self._make_conn()
+        cursor.rowcount = 1
+
+        sites = [
+            {
+                "site": "example.com",
+                "status": "Одобрен",
+                "description": None,
+                "traffic": 1000,
+                "sqi": 500,
+                "cf_tf": 2011,
+                "trust": 30,
+            },
+            {
+                "site": "site.org",
+                "status": "Отклонен",
+                "description": "Причина отказа",
+                "traffic": 50,
+                "sqi": 100,
+                "cf_tf": 105,
+                "trust": 5,
+            },
+        ]
+
+        updated = save_sites_to_db(conn, sites, logger)
+
+        assert updated == 2
+        assert cursor.execute.call_count == 2
+        conn.commit.assert_called_once()
+        cursor.close.assert_called_once()
+
+        # Проверяем host в последнем параметре UPDATE.
+        first_call_params = cursor.execute.call_args_list[0][0][1]
+        second_call_params = cursor.execute.call_args_list[1][0][1]
+        assert first_call_params[-1] == "example.com"
+        assert second_call_params[-1] == "site.org"
+
+    def test_save_sites_to_db_empty_sites(self):
+        logger = logging.getLogger("test")
+        conn, cursor = self._make_conn()
+
+        updated = save_sites_to_db(conn, [], logger)
+
+        assert updated == 0
+        cursor.execute.assert_not_called()
+        conn.commit.assert_not_called()
+
+    def test_save_sites_to_db_rolls_back_on_db_error(self):
+        logger = logging.getLogger("test")
+        conn, cursor = self._make_conn()
+        cursor.execute.side_effect = mysql.connector.Error("db error")
+
+        sites = [
+            {
+                "site": "example.com",
+                "status": "Одобрен",
+                "description": None,
+                "traffic": 1000,
+                "sqi": 500,
+                "cf_tf": 2011,
+                "trust": 30,
+            }
+        ]
+
+        updated = save_sites_to_db(conn, sites, logger)
+
+        assert updated == 0
+        conn.rollback.assert_called_once()
+        cursor.close.assert_called_once()
 
 
 class TestDatabaseOperations:

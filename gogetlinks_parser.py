@@ -19,6 +19,7 @@ Exit Codes:
 """
 
 import configparser
+import argparse
 import html
 import logging
 import os
@@ -44,7 +45,7 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.remote.webelement import WebElement
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support.ui import Select, WebDriverWait
 
 # =============================================================================
 # CONSTANTS
@@ -55,6 +56,8 @@ HOME_URL = "https://gogetlinks.net"
 LOGIN_URL = "https://gogetlinks.net/user/signIn"
 TASK_LIST_URL = "https://gogetlinks.net/webTask/index"
 TASK_DETAIL_URL = "https://gogetlinks.net/template/view_task.php?curr_id={}"
+MY_SITES_URL = "https://gogetlinks.net/mySites"
+MY_SITES_CHANGE_COUNT_URL = "https://gogetlinks.net/mySites/changeCountInPage"
 
 # Database objects
 DB_SCHEMA = "ddl"
@@ -1266,6 +1269,341 @@ def parse_task_list(
         return []
 
 
+def extract_digits_only(text: str) -> Optional[int]:
+    """Extract digits from text and return as int.
+
+    Examples:
+        "123" -> 123
+        "CF 20 / TF 11" -> 2011
+        "N/A" -> None
+    """
+    if not text:
+        return None
+
+    digits = "".join(re.findall(r"\d+", text))
+    if not digits:
+        return None
+
+    try:
+        return int(digits)
+    except ValueError:
+        return None
+
+
+def set_my_sites_count_in_page(driver: webdriver.Chrome, logger: logging.Logger) -> None:
+    """Try to set mySites page size to maximum value."""
+    select_candidates = [
+        "select[name='count_in_page']",
+        "select#count_in_page",
+        "select.js-count-in-page",
+    ]
+
+    for selector in select_candidates:
+        try:
+            select_elements = driver.find_elements(By.CSS_SELECTOR, selector)
+            if len(select_elements) == 0:
+                continue
+
+            select = Select(select_elements[0])
+            values: List[int] = []
+            for option in select.options:
+                option_value = option.get_attribute("value") or option.text
+                value_num = extract_digits_only(option_value)
+                if value_num is not None:
+                    values.append(value_num)
+
+            if len(values) == 0:
+                continue
+
+            max_value = max(values)
+            try:
+                select.select_by_value(str(max_value))
+            except NoSuchElementException:
+                select.select_by_visible_text(str(max_value))
+
+            logger.info(f"mySites page size changed via selector to {max_value}")
+            time.sleep(1.5)
+            return
+
+        except Exception as e:
+            logger.debug(
+                f"Failed to set page size using selector {selector}: {type(e).__name__}: {e}"
+            )
+
+    try:
+        # Fallback for new frontend: same-origin POST to change count in page.
+        result = driver.execute_async_script(
+            """
+            const callback = arguments[arguments.length - 1];
+            const url = arguments[0];
+            fetch(url, {
+                method: 'POST',
+                credentials: 'include',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'
+                },
+                body: 'count_in_page=2000'
+            }).then((response) => {
+                callback({ok: response.ok, status: response.status});
+            }).catch((error) => {
+                callback({ok: false, error: String(error)});
+            });
+            """,
+            MY_SITES_CHANGE_COUNT_URL,
+        )
+
+        if isinstance(result, dict) and result.get("ok"):
+            logger.info("mySites page size changed via POST to 2000")
+            time.sleep(1.0)
+            return
+
+        logger.warning(f"mySites page size POST returned unexpected result: {result}")
+
+    except Exception as e:
+        logger.warning(f"Failed to set mySites page size via POST: {e}")
+
+
+def extract_reject_link(status_cell: WebElement) -> Optional[str]:
+    """Extract rejection details URL from status cell."""
+    try:
+        links = status_cell.find_elements(By.TAG_NAME, "a")
+        for link in links:
+            href = link.get_attribute("href")
+            if href:
+                return href
+    except Exception:
+        pass
+    return None
+
+
+def fetch_reject_description(
+    driver: webdriver.Chrome,
+    details_url: str,
+    logger: logging.Logger,
+) -> Optional[str]:
+    """Open rejection page in new tab and extract reason text."""
+    if not details_url:
+        return None
+
+    original_handle = driver.current_window_handle
+    initial_handles = driver.window_handles[:]
+
+    try:
+        driver.execute_script("window.open(arguments[0], '_blank');", details_url)
+
+        wait = WebDriverWait(driver, PAGE_LOAD_TIMEOUT)
+        wait.until(lambda d: len(d.window_handles) > len(initial_handles))
+
+        new_handles = [h for h in driver.window_handles if h not in initial_handles]
+        if len(new_handles) == 0:
+            return None
+
+        reject_handle = new_handles[-1]
+        driver.switch_to.window(reject_handle)
+        wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+        time.sleep(0.4)
+
+        selectors = [
+            ".reject-reason",
+            ".reason",
+            ".alert-danger",
+            ".modal-body",
+            ".panel-body",
+            ".content",
+            ".text",
+            "body",
+        ]
+        for selector in selectors:
+            elements = driver.find_elements(By.CSS_SELECTOR, selector)
+            for element in elements:
+                text = sanitize_text(element.text)
+                if len(text) >= 10:
+                    return text
+
+        return None
+
+    except Exception as e:
+        logger.debug(
+            f"Failed to fetch reject description from {details_url}: "
+            f"{type(e).__name__}: {e}"
+        )
+        return None
+
+    finally:
+        try:
+            current_handle = driver.current_window_handle
+            if current_handle != original_handle:
+                driver.close()
+                driver.switch_to.window(original_handle)
+        except Exception:
+            try:
+                driver.switch_to.window(original_handle)
+            except Exception:
+                pass
+
+
+def parse_site_row(
+    row: WebElement,
+    driver: webdriver.Chrome,
+    logger: logging.Logger,
+) -> Optional[Dict[str, Any]]:
+    """Parse one row from /mySites table."""
+    cells = row.find_elements(By.TAG_NAME, "td")
+    if len(cells) < 10:
+        return None
+
+    site = ""
+    try:
+        site_link = row.find_element(By.CSS_SELECTOR, ".site-link__info")
+        site = sanitize_text(site_link.text)
+    except NoSuchElementException:
+        try:
+            site = sanitize_text(cells[0].text)
+        except Exception:
+            site = ""
+
+    if not site:
+        return None
+
+    status = sanitize_text(cells[1].text)
+    sqi = extract_digits_only(sanitize_text(cells[2].text))
+    cf_tf = extract_digits_only(sanitize_text(cells[3].text))
+    traffic = extract_digits_only(sanitize_text(cells[5].text))
+    trust = extract_digits_only(sanitize_text(cells[9].text))
+
+    description = None
+    if "отклон" in status.lower():
+        reject_link = extract_reject_link(cells[1])
+        if reject_link:
+            description = fetch_reject_description(driver, reject_link, logger)
+
+    return {
+        "site": site.lower(),
+        "status": status,
+        "sqi": sqi,
+        "cf_tf": cf_tf,
+        "traffic": traffic,
+        "trust": trust,
+        "description": description,
+    }
+
+
+def parse_my_sites(
+    driver: webdriver.Chrome,
+    logger: logging.Logger,
+) -> List[Dict[str, Any]]:
+    """Parse /mySites table and return normalized site metrics."""
+    logger.info("Parsing mySites page")
+
+    try:
+        driver.get(MY_SITES_URL)
+        WebDriverWait(driver, PAGE_LOAD_TIMEOUT).until(
+            EC.presence_of_element_located((By.TAG_NAME, "body"))
+        )
+
+        set_my_sites_count_in_page(driver, logger)
+
+        # Reload page to apply count-in-page state and wait for rows.
+        driver.get(MY_SITES_URL)
+        wait = WebDriverWait(driver, PAGE_LOAD_TIMEOUT)
+        wait.until(
+            lambda d: len(
+                [
+                    row
+                    for row in d.find_elements(By.CSS_SELECTOR, "table tbody tr")
+                    if len(row.find_elements(By.TAG_NAME, "td")) >= 10
+                ]
+            )
+            > 0
+            or "нет сайтов" in d.page_source.lower()
+        )
+
+        rows = [
+            row
+            for row in driver.find_elements(By.CSS_SELECTOR, "table tbody tr")
+            if len(row.find_elements(By.TAG_NAME, "td")) >= 10
+        ]
+
+        if len(rows) == 0:
+            logger.warning("No rows found on mySites page")
+            return []
+
+        sites: List[Dict[str, Any]] = []
+        for row in rows:
+            site_data = parse_site_row(row, driver, logger)
+            if site_data:
+                sites.append(site_data)
+
+        logger.info(f"mySites parsed: {len(sites)} sites")
+        return sites
+
+    except TimeoutException:
+        logger.error("Timeout waiting for mySites table rows")
+        return []
+
+    except Exception as e:
+        logger.error(f"Failed to parse mySites page: {e}")
+        return []
+
+
+def save_sites_to_db(
+    conn: MySQLConnection,
+    sites: List[Dict[str, Any]],
+    logger: logging.Logger,
+) -> int:
+    """Update ddl.domain rows by host with metrics parsed from /mySites."""
+    if len(sites) == 0:
+        logger.info("No mySites data to save")
+        return 0
+
+    query = """
+        UPDATE domain SET
+            ggl_status = %s,
+            ggl_description = %s,
+            ggl_traffic = %s,
+            ggl_sqi = %s,
+            ggl_cf_tf = %s,
+            ggl_trust = %s,
+            ggl_update_at = NOW()
+        WHERE host = %s
+    """
+
+    updated_count = 0
+    cursor = conn.cursor()
+
+    try:
+        for site in sites:
+            cursor.execute(
+                query,
+                (
+                    site.get("status"),
+                    site.get("description"),
+                    site.get("traffic"),
+                    site.get("sqi"),
+                    site.get("cf_tf"),
+                    site.get("trust"),
+                    site.get("site"),
+                ),
+            )
+            if cursor.rowcount and cursor.rowcount > 0:
+                updated_count += cursor.rowcount
+
+        conn.commit()
+
+        logger.info(
+            f"mySites DB update completed: parsed={len(sites)}, updated={updated_count}"
+        )
+        return updated_count
+
+    except mysql.connector.Error as e:
+        conn.rollback()
+        logger.error(f"Failed to update domain metrics: {e}")
+        return 0
+
+    finally:
+        cursor.close()
+
+
 # =============================================================================
 # OUTPUT
 # =============================================================================
@@ -1433,7 +1771,18 @@ def send_telegram_notification(
 # =============================================================================
 
 
-def main() -> int:
+def parse_cli_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(description="Gogetlinks Task Parser")
+    parser.add_argument(
+        "--skip-sites",
+        action="store_true",
+        help="Skip parsing /mySites and updating ddl.domain metrics",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: Optional[List[str]] = None) -> int:
     """Main entry point.
 
     Returns:
@@ -1444,6 +1793,8 @@ def main() -> int:
     driver = None
 
     try:
+        args = parse_cli_args(argv)
+
         # 1. Setup logger (minimal config before loading config.ini)
         logger = setup_logger()
         logger.info("Starting Gogetlinks Task Parser")
@@ -1500,30 +1851,39 @@ def main() -> int:
 
         if not tasks:
             logger.warning("No tasks parsed")
-            return EXIT_SUCCESS
+        else:
+            # 7. Save tasks to database
+            logger.info(f"Saving {len(tasks)} tasks to database")
+            success_count = 0
+            new_tasks = []
+            for task in tasks:
+                result = insert_or_update_task(conn, task, logger)
+                if result is not None:
+                    success_count += 1
+                    if result is True:
+                        new_tasks.append(task)
 
-        # 7. Save tasks to database
-        logger.info(f"Saving {len(tasks)} tasks to database")
-        success_count = 0
-        new_tasks = []
-        for task in tasks:
-            result = insert_or_update_task(conn, task, logger)
-            if result is not None:
-                success_count += 1
-                if result is True:
-                    new_tasks.append(task)
+            logger.info(
+                f"Successfully saved {success_count}/{len(tasks)} tasks "
+                f"({len(new_tasks)} new)"
+            )
 
-        logger.info(
-            f"Successfully saved {success_count}/{len(tasks)} tasks "
-            f"({len(new_tasks)} new)"
-        )
+            # 8. Send Telegram notification for new tasks
+            if len(new_tasks) > 0:
+                send_telegram_notification(new_tasks, config, logger)
 
-        # 8. Send Telegram notification for new tasks
-        if len(new_tasks) > 0:
-            send_telegram_notification(new_tasks, config, logger)
+            # 9. Print output (if enabled)
+            print_tasks(tasks, config["output"]["print_to_console"])
 
-        # 9. Print output (if enabled)
-        print_tasks(tasks, config["output"]["print_to_console"])
+        # 10. Parse and save mySites metrics
+        if args.skip_sites:
+            logger.info("Skipping mySites parsing (--skip-sites)")
+        else:
+            sites = parse_my_sites(driver, logger)
+            updated_sites = save_sites_to_db(conn, sites, logger)
+            logger.info(
+                f"mySites summary: parsed={len(sites)}, updated={updated_sites}"
+            )
 
         logger.info("Parsing completed successfully")
         return EXIT_SUCCESS
