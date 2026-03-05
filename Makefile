@@ -139,8 +139,10 @@ deploy-check: ## Проверить готовность к деплою
 
 setup-cron: ## Добавить задачу в crontab
 	@echo "$(BLUE)Настройка cron...$(NC)"
-	@echo "Добавьте следующую строку в crontab (crontab -e):"
-	@echo "$(GREEN)0 * * * * cd $(PWD) && venv/bin/python gogetlinks_parser.py >> /var/log/gogetlinks_cron.log 2>&1$(NC)"
+	@echo "Добавьте следующие строки в crontab (crontab -e):"
+	@echo "$(GREEN)CRON_TZ=Europe/Moscow$(NC)"
+	@echo "$(GREEN)0 * * * * cd $(PWD) && venv/bin/python gogetlinks_parser.py --skip-sites >> /var/log/gogetlinks_cron.log 2>&1$(NC)"
+	@echo "$(GREEN)15 7 * * * cd $(PWD) && venv/bin/python gogetlinks_parser.py --skip-tasks >> /var/log/gogetlinks_cron.log 2>&1$(NC)"
 
 backup-db: ## Создать backup базы данных
 	@echo "$(BLUE)Создание backup...$(NC)"

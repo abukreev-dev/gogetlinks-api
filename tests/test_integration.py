@@ -9,7 +9,9 @@ from unittest.mock import Mock, patch, MagicMock
 
 from gogetlinks_parser import (
     format_telegram_message,
+    format_status_changes_message,
     send_telegram_notification,
+    send_status_changes_notification,
     save_cookies,
     load_cookies,
     COOKIE_FILE,
@@ -146,6 +148,28 @@ class TestTelegramMessage:
         assert "(1)" in message
         assert "Single Task" in message
 
+    def test_format_status_changes_message(self):
+        changes = [
+            {
+                "site": "example.com",
+                "old_status": "Доступен",
+                "new_status": "Отклонен, подробнее...",
+            },
+            {
+                "site": "site.org",
+                "old_status": "Скрыт",
+                "new_status": "Доступен",
+            },
+        ]
+
+        message = format_status_changes_message(changes)
+
+        assert "Изменения статусов GoGetLinks (2)" in message
+        assert "example.com" in message
+        assert "Доступен" in message
+        assert "Отклонен, подробнее..." in message
+        assert "https://gogetlinks.net/mySites" in message
+
 
 class TestTelegramSending:
     """Тесты отправки Telegram-уведомлений"""
@@ -232,6 +256,36 @@ class TestTelegramSending:
         """Тест с пустым списком задач."""
         result = send_telegram_notification([], telegram_config, logger)
 
+        assert result is False
+
+    @patch("gogetlinks_parser.requests.post")
+    def test_send_status_changes_notification_success(
+        self, mock_post, telegram_config, logger
+    ):
+        mock_response = Mock()
+        mock_response.json.return_value = {"ok": True}
+        mock_response.raise_for_status.return_value = None
+        mock_post.return_value = mock_response
+
+        changes = [
+            {
+                "site": "example.com",
+                "old_status": "Доступен",
+                "new_status": "Скрыт",
+            }
+        ]
+        result = send_status_changes_notification(changes, telegram_config, logger)
+
+        assert result is True
+        mock_post.assert_called_once()
+        call_kwargs = mock_post.call_args
+        payload = call_kwargs.kwargs.get("json") or call_kwargs[1].get("json")
+        assert payload["chat_id"] == "-100123456789"
+        assert payload["parse_mode"] == "HTML"
+        assert "example.com" in payload["text"]
+
+    def test_send_status_changes_notification_empty(self, telegram_config, logger):
+        result = send_status_changes_notification([], telegram_config, logger)
         assert result is False
 
 

@@ -93,6 +93,7 @@ class TestSaveSitesToDb:
     def _make_conn(self):
         conn = Mock()
         cursor = Mock()
+        cursor.fetchall.return_value = []
         conn.cursor.return_value = cursor
         return conn, cursor
 
@@ -100,6 +101,10 @@ class TestSaveSitesToDb:
         logger = logging.getLogger("test")
         conn, cursor = self._make_conn()
         cursor.rowcount = 1
+        cursor.fetchall.return_value = [
+            ("example.com", "Отклонен"),
+            ("site.org", "Отклонен"),
+        ]
 
         sites = [
             {
@@ -122,16 +127,22 @@ class TestSaveSitesToDb:
             },
         ]
 
-        updated = save_sites_to_db(conn, sites, logger)
+        updated, status_changes = save_sites_to_db(conn, sites, logger)
 
         assert updated == 2
-        assert cursor.execute.call_count == 2
+        assert len(status_changes) == 1
+        assert status_changes[0]["site"] == "example.com"
+        assert status_changes[0]["old_status"] == "Отклонен"
+        assert status_changes[0]["new_status"] == "Одобрен"
+
+        # 1 select + 2 update
+        assert cursor.execute.call_count == 3
         conn.commit.assert_called_once()
         cursor.close.assert_called_once()
 
         # Проверяем host в последнем параметре UPDATE.
-        first_call_params = cursor.execute.call_args_list[0][0][1]
-        second_call_params = cursor.execute.call_args_list[1][0][1]
+        first_call_params = cursor.execute.call_args_list[1][0][1]
+        second_call_params = cursor.execute.call_args_list[2][0][1]
         assert first_call_params[-1] == "example.com"
         assert second_call_params[-1] == "site.org"
 
@@ -139,9 +150,10 @@ class TestSaveSitesToDb:
         logger = logging.getLogger("test")
         conn, cursor = self._make_conn()
 
-        updated = save_sites_to_db(conn, [], logger)
+        updated, status_changes = save_sites_to_db(conn, [], logger)
 
         assert updated == 0
+        assert status_changes == []
         cursor.execute.assert_not_called()
         conn.commit.assert_not_called()
 
@@ -162,9 +174,10 @@ class TestSaveSitesToDb:
             }
         ]
 
-        updated = save_sites_to_db(conn, sites, logger)
+        updated, status_changes = save_sites_to_db(conn, sites, logger)
 
         assert updated == 0
+        assert status_changes == []
         conn.rollback.assert_called_once()
         cursor.close.assert_called_once()
 

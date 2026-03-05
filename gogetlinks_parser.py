@@ -1638,11 +1638,11 @@ def save_sites_to_db(
     conn: MySQLConnection,
     sites: List[Dict[str, Any]],
     logger: logging.Logger,
-) -> int:
+) -> tuple[int, List[Dict[str, str]]]:
     """Update ddl.domain rows by host with metrics parsed from /mySites."""
     if len(sites) == 0:
         logger.info("No mySites data to save")
-        return 0
+        return 0, []
 
     query = """
         UPDATE domain SET
@@ -1657,20 +1657,48 @@ def save_sites_to_db(
     """
 
     updated_count = 0
+    status_changes: List[Dict[str, str]] = []
     cursor = conn.cursor()
 
     try:
+        hosts = [site.get("site") for site in sites if site.get("site")]
+        existing_status_map: Dict[str, Optional[str]] = {}
+        if len(hosts) > 0:
+            placeholders = ", ".join(["%s"] * len(hosts))
+            cursor.execute(
+                f"SELECT host, ggl_status FROM domain WHERE host IN ({placeholders})",
+                tuple(hosts),
+            )
+            for host, ggl_status in cursor.fetchall():
+                if host:
+                    existing_status_map[str(host).lower()] = ggl_status
+
         for site in sites:
+            host = site.get("site")
+            new_status_raw = site.get("status")
+            new_status = sanitize_text(new_status_raw) if new_status_raw else ""
+            old_status_raw = existing_status_map.get(host, "")
+            old_status = sanitize_text(old_status_raw) if old_status_raw else ""
+
+            if host and old_status != new_status:
+                status_changes.append(
+                    {
+                        "site": host,
+                        "old_status": old_status or "—",
+                        "new_status": new_status or "—",
+                    }
+                )
+
             cursor.execute(
                 query,
                 (
-                    site.get("status"),
+                    new_status_raw,
                     site.get("description"),
                     site.get("traffic"),
                     site.get("sqi"),
                     site.get("cf_tf"),
                     site.get("trust"),
-                    site.get("site"),
+                    host,
                 ),
             )
             if cursor.rowcount and cursor.rowcount > 0:
@@ -1679,14 +1707,16 @@ def save_sites_to_db(
         conn.commit()
 
         logger.info(
-            f"mySites DB update completed: parsed={len(sites)}, updated={updated_count}"
+            "mySites DB update completed: "
+            f"parsed={len(sites)}, updated={updated_count}, "
+            f"status_changed={len(status_changes)}"
         )
-        return updated_count
+        return updated_count, status_changes
 
     except mysql.connector.Error as e:
         conn.rollback()
         logger.error(f"Failed to update domain metrics: {e}")
-        return 0
+        return 0, []
 
     finally:
         cursor.close()
@@ -1794,6 +1824,29 @@ def format_telegram_message(
     return message
 
 
+def format_status_changes_message(changes: List[Dict[str, str]]) -> str:
+    """Format status change list as Telegram HTML message."""
+    lines = [f"<b>Изменения статусов GoGetLinks ({len(changes)})</b>"]
+
+    for change in changes:
+        site = html.escape(change.get("site", "—"))
+        old_status = html.escape(change.get("old_status", "—"))
+        new_status = html.escape(change.get("new_status", "—"))
+        lines.append(f"• {site}: {old_status} → <b>{new_status}</b>")
+
+    lines.append("")
+    lines.append('<a href="https://gogetlinks.net/mySites">Открыть Мои сайты</a>')
+
+    message = "\n".join(lines)
+
+    if len(message) > TELEGRAM_MAX_MESSAGE_LENGTH:
+        footer = '\n\n<a href="https://gogetlinks.net/mySites">Открыть Мои сайты</a>'
+        message = message[: TELEGRAM_MAX_MESSAGE_LENGTH - len(footer) - 20]
+        message += "\n<i>...обрезано</i>" + footer
+
+    return message
+
+
 def send_telegram_notification(
     tasks: List[Dict[str, Any]],
     config: Dict[str, Any],
@@ -1854,6 +1907,58 @@ def send_telegram_notification(
         return False
 
 
+def send_status_changes_notification(
+    changes: List[Dict[str, str]],
+    config: Dict[str, Any],
+    logger: logging.Logger,
+) -> bool:
+    """Send Telegram notification about changed ggl_status values."""
+    telegram_config = config["telegram"]
+
+    if not telegram_config.get("enabled"):
+        logger.debug("Telegram notifications disabled")
+        return False
+
+    bot_token = telegram_config.get("bot_token", "")
+    chat_id = telegram_config.get("chat_id", "")
+
+    if not bot_token or not chat_id:
+        logger.warning("Telegram bot_token or chat_id not configured")
+        return False
+
+    if len(changes) == 0:
+        logger.debug("No status changes to notify about")
+        return False
+
+    message = format_status_changes_message(changes)
+    url = TELEGRAM_API_URL.format(bot_token)
+
+    payload = {
+        "chat_id": chat_id,
+        "text": message,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }
+
+    try:
+        response = requests.post(url, json=payload, timeout=30)
+        response.raise_for_status()
+        result = response.json()
+
+        if result.get("ok"):
+            logger.info(
+                "Telegram status-change notification sent: "
+                f"{len(changes)} site(s)"
+            )
+            return True
+
+        logger.error(f"Telegram API error: {result.get('description')}")
+        return False
+    except requests.RequestException as e:
+        logger.error(f"Failed to send status-change notification: {e}")
+        return False
+
+
 # =============================================================================
 # MAIN
 # =============================================================================
@@ -1862,6 +1967,11 @@ def send_telegram_notification(
 def parse_cli_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(description="Gogetlinks Task Parser")
+    parser.add_argument(
+        "--skip-tasks",
+        action="store_true",
+        help="Skip parsing tasks and notifications from /webTask",
+    )
     parser.add_argument(
         "--skip-sites",
         action="store_true",
@@ -1882,6 +1992,13 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     try:
         args = parse_cli_args(argv)
+
+        if args.skip_tasks and args.skip_sites:
+            logger = setup_logger()
+            logger.warning(
+                "Both --skip-tasks and --skip-sites are set; nothing to do"
+            )
+            return EXIT_SUCCESS
 
         # 1. Setup logger (minimal config before loading config.ini)
         logger = setup_logger()
@@ -1976,43 +2093,50 @@ def main(argv: Optional[List[str]] = None) -> int:
             logger.error("Authentication failed")
             return EXIT_AUTH_FAILED
 
-        # 6. Parse task list
-        tasks = parse_task_list(driver, logger, conn)
-
-        if not tasks:
-            logger.warning("No tasks parsed")
+        if args.skip_tasks:
+            logger.info("Skipping task parsing (--skip-tasks)")
         else:
-            # 7. Save tasks to database
-            logger.info(f"Saving {len(tasks)} tasks to database")
-            success_count = 0
-            new_tasks = []
-            for task in tasks:
-                result = insert_or_update_task(conn, task, logger)
-                if result is not None:
-                    success_count += 1
-                    if result is True:
-                        new_tasks.append(task)
+            # 6. Parse task list
+            tasks = parse_task_list(driver, logger, conn)
 
-            logger.info(
-                f"Successfully saved {success_count}/{len(tasks)} tasks "
-                f"({len(new_tasks)} new)"
-            )
+            if not tasks:
+                logger.warning("No tasks parsed")
+            else:
+                # 7. Save tasks to database
+                logger.info(f"Saving {len(tasks)} tasks to database")
+                success_count = 0
+                new_tasks = []
+                for task in tasks:
+                    result = insert_or_update_task(conn, task, logger)
+                    if result is not None:
+                        success_count += 1
+                        if result is True:
+                            new_tasks.append(task)
 
-            # 8. Send Telegram notification for new tasks
-            if len(new_tasks) > 0:
-                send_telegram_notification(new_tasks, config, logger)
+                logger.info(
+                    f"Successfully saved {success_count}/{len(tasks)} tasks "
+                    f"({len(new_tasks)} new)"
+                )
 
-            # 9. Print output (if enabled)
-            print_tasks(tasks, config["output"]["print_to_console"])
+                # 8. Send Telegram notification for new tasks
+                if len(new_tasks) > 0:
+                    send_telegram_notification(new_tasks, config, logger)
+
+                # 9. Print output (if enabled)
+                print_tasks(tasks, config["output"]["print_to_console"])
 
         # 10. Parse and save mySites metrics
         if args.skip_sites:
             logger.info("Skipping mySites parsing (--skip-sites)")
         else:
             sites = parse_my_sites(driver, logger)
-            updated_sites = save_sites_to_db(conn, sites, logger)
+            updated_sites, status_changes = save_sites_to_db(conn, sites, logger)
+            if len(status_changes) > 0:
+                send_status_changes_notification(status_changes, config, logger)
             logger.info(
-                f"mySites summary: parsed={len(sites)}, updated={updated_sites}"
+                "mySites summary: "
+                f"parsed={len(sites)}, updated={updated_sites}, "
+                f"status_changed={len(status_changes)}"
             )
 
         logger.info("Parsing completed successfully")
