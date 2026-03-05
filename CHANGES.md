@@ -1,6 +1,6 @@
 # Changelog
 
-## 2026-03-05 - v1.3: mySites Metrics + Status Alerts + Split Schedule
+## 2026-03-05 - v1.2.1: mySites Metrics + Status Alerts + Split Schedule
 
 ### Features
 - ✅ Parsing `/mySites` and updating `ddl.domain` metrics by `host`
