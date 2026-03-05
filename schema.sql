@@ -4,15 +4,9 @@
 -- Использование:
 -- mysql -u root -p < schema.sql
 
--- Создание базы данных
-CREATE DATABASE IF NOT EXISTS gogetlinks
-    CHARACTER SET utf8mb4
-    COLLATE utf8mb4_unicode_ci;
-
-USE gogetlinks;
-
 -- Создание таблицы задач
-CREATE TABLE IF NOT EXISTS tasks (
+-- Важно: база ddl должна существовать заранее
+CREATE TABLE IF NOT EXISTS ddl.ggl_tasks (
     id INT AUTO_INCREMENT PRIMARY KEY COMMENT 'Внутренний ID',
     task_id INT UNIQUE NOT NULL COMMENT 'ID задачи на gogetlinks.net',
 
@@ -52,9 +46,9 @@ COMMENT='Задачи с gogetlinks.net';
 
 -- Создание пользователя для парсера (выполните отдельно с правами root)
 -- CREATE USER 'gogetlinks_parser'@'localhost' IDENTIFIED BY 'STRONG_PASSWORD_HERE';
--- GRANT SELECT, INSERT, UPDATE ON gogetlinks.* TO 'gogetlinks_parser'@'localhost';
+-- GRANT SELECT, INSERT, UPDATE ON ddl.* TO 'gogetlinks_parser'@'localhost';
 -- FLUSH PRIVILEGES;
 
 -- Проверка создания таблицы
-SHOW TABLES;
-DESCRIBE tasks;
+SHOW TABLES FROM ddl;
+DESCRIBE ddl.ggl_tasks;

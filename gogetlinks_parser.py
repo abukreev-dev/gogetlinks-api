@@ -56,6 +56,11 @@ LOGIN_URL = "https://gogetlinks.net/user/signIn"
 TASK_LIST_URL = "https://gogetlinks.net/webTask/index"
 TASK_DETAIL_URL = "https://gogetlinks.net/template/view_task.php?curr_id={}"
 
+# Database objects
+DB_SCHEMA = "ddl"
+DB_TABLE = "ggl_tasks"
+DB_FULL_TABLE = f"{DB_SCHEMA}.{DB_TABLE}"
+
 # Timeouts
 CAPTCHA_TIMEOUT = 120
 CAPTCHA_POLL_INTERVAL = 5
@@ -315,7 +320,10 @@ def task_exists(conn: MySQLConnection, task_id: int) -> bool:
     """
     cursor = conn.cursor()
     try:
-        cursor.execute("SELECT 1 FROM tasks WHERE task_id = %s LIMIT 1", (task_id,))
+        cursor.execute(
+            f"SELECT 1 FROM {DB_FULL_TABLE} WHERE task_id = %s LIMIT 1",
+            (task_id,),
+        )
         result = cursor.fetchone()
         return result is not None
     finally:
@@ -338,7 +346,7 @@ def task_has_details(conn: MySQLConnection, task_id: int) -> bool:
     cursor = conn.cursor()
     try:
         cursor.execute(
-            "SELECT 1 FROM tasks WHERE task_id = %s"
+            f"SELECT 1 FROM {DB_FULL_TABLE} WHERE task_id = %s"
             " AND description IS NOT NULL AND description != '' LIMIT 1",
             (task_id,),
         )
@@ -366,8 +374,8 @@ def insert_or_update_task(
     cursor = conn.cursor()
 
     try:
-        query = """
-            INSERT INTO tasks (
+        query = f"""
+            INSERT INTO {DB_FULL_TABLE} (
                 task_id, domain, customer, customer_url,
                 external_links, title, time_passed, price,
                 description, url, requirements, contacts, deadline,

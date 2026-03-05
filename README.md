@@ -85,7 +85,7 @@ api_key = your_anticaptcha_api_key
 [database]
 host = localhost
 port = 3306
-database = gogetlinks
+database = ddl
 user = gogetlinks_parser
 password = db_password
 
@@ -135,7 +135,7 @@ log_file = logs/gogetlinks_parser.log
 ## 📊 Схема базы данных
 
 ```sql
-CREATE TABLE tasks (
+CREATE TABLE ddl.ggl_tasks (
     id INT AUTO_INCREMENT PRIMARY KEY,
     task_id INT UNIQUE NOT NULL,
     title VARCHAR(500),

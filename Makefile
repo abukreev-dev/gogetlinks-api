@@ -41,10 +41,10 @@ setup-config: ## Создать config.ini из шаблона
 	fi
 
 setup-db: ## Инициализировать базу данных
-	@echo "$(BLUE)Создание базы данных...$(NC)"
+	@echo "$(BLUE)Применение схемы БД...$(NC)"
 	@read -p "MySQL root password: " password; \
 	mysql -u root -p$$password < schema.sql
-	@echo "$(GREEN)✓ База данных создана$(NC)"
+	@echo "$(GREEN)✓ Схема БД применена$(NC)"
 
 test: ## Запустить тесты
 	@echo "$(BLUE)Запуск тестов...$(NC)"
@@ -103,7 +103,7 @@ db-tasks: ## Показать новые задачи из БД
 	@echo "$(BLUE)Запрос новых задач...$(NC)"
 	@read -p "MySQL user: " user; \
 	read -s -p "MySQL password: " password; echo; \
-	mysql -u $$user -p$$password gogetlinks -e "SELECT task_id, domain, price, customer, time_passed FROM tasks WHERE is_new=1 ORDER BY created_at DESC LIMIT 10;"
+	mysql -u $$user -p$$password -e "SELECT task_id, domain, price, customer, time_passed FROM ddl.ggl_tasks WHERE is_new=1 ORDER BY created_at DESC LIMIT 10;"
 
 clean: ## Очистить временные файлы
 	@echo "$(BLUE)Очистка...$(NC)"
@@ -135,7 +135,7 @@ deploy-check: ## Проверить готовность к деплою
 	@echo "$(BLUE)--- Проверка MySQL подключения ---$(NC)"
 	@read -p "MySQL user: " user; \
 	read -s -p "MySQL password: " password; echo; \
-	mysql -u $$user -p$$password -e "USE gogetlinks; SHOW TABLES;" && echo "$(GREEN)✓ База данных доступна$(NC)" || echo "$(YELLOW)✗ Ошибка подключения к БД$(NC)"
+	mysql -u $$user -p$$password -e "SHOW TABLES FROM ddl;" && echo "$(GREEN)✓ База данных доступна$(NC)" || echo "$(YELLOW)✗ Ошибка подключения к БД$(NC)"
 
 setup-cron: ## Добавить задачу в crontab
 	@echo "$(BLUE)Настройка cron...$(NC)"
@@ -146,7 +146,7 @@ backup-db: ## Создать backup базы данных
 	@echo "$(BLUE)Создание backup...$(NC)"
 	@read -p "MySQL user: " user; \
 	read -s -p "MySQL password: " password; echo; \
-	mysqldump -u $$user -p$$password gogetlinks > backup_gogetlinks_$$(date +%Y%m%d_%H%M%S).sql
+	mysqldump -u $$user -p$$password ddl ggl_tasks > backup_ddl_ggl_tasks_$$(date +%Y%m%d_%H%M%S).sql
 	@echo "$(GREEN)✓ Backup создан$(NC)"
 
 all: install setup-config setup-db test ## Полная установка и проверка
