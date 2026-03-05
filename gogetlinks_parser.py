@@ -58,6 +58,7 @@ TASK_LIST_URL = "https://gogetlinks.net/webTask/index"
 TASK_DETAIL_URL = "https://gogetlinks.net/template/view_task.php?curr_id={}"
 MY_SITES_URL = "https://gogetlinks.net/mySites"
 MY_SITES_CHANGE_COUNT_URL = "https://gogetlinks.net/mySites/changeCountInPage"
+DEFAULT_FALLBACK_PROXY = os.getenv("GGL_FALLBACK_PROXY", "127.0.0.1:3128").strip()
 
 # Database objects
 DB_SCHEMA = "ddl"
@@ -457,7 +458,10 @@ def close_database(conn: MySQLConnection, logger: logging.Logger) -> None:
 # =============================================================================
 
 
-def initialize_driver(logger: logging.Logger) -> webdriver.Chrome:
+def initialize_driver(
+    logger: logging.Logger,
+    proxy_server: Optional[str] = None,
+) -> webdriver.Chrome:
     """Initialize headless Chrome driver.
 
     Args:
@@ -469,7 +473,10 @@ def initialize_driver(logger: logging.Logger) -> webdriver.Chrome:
     Raises:
         WebDriverException: If driver initialization fails
     """
-    logger.info("Initializing Chrome WebDriver")
+    if proxy_server:
+        logger.info(f"Initializing Chrome WebDriver (proxy: {proxy_server})")
+    else:
+        logger.info("Initializing Chrome WebDriver")
 
     options = Options()
     options.add_argument("--headless=new")
@@ -477,6 +484,8 @@ def initialize_driver(logger: logging.Logger) -> webdriver.Chrome:
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-extensions")
     options.add_argument("--window-size=1920,1080")
+    if proxy_server:
+        options.add_argument(f"--proxy-server=http://{proxy_server}")
 
     # User-Agent spoofing
     options.add_argument(
@@ -493,6 +502,30 @@ def initialize_driver(logger: logging.Logger) -> webdriver.Chrome:
     except WebDriverException as e:
         logger.error(f"Failed to initialize WebDriver: {e}")
         raise
+
+
+def is_anti_bot_blocked(driver: webdriver.Chrome) -> bool:
+    """Detect anti-bot/forbidden pages that block login flow."""
+    try:
+        current_url = (driver.current_url or "").lower()
+    except Exception:
+        current_url = ""
+
+    if "/403.php" in current_url:
+        return True
+
+    try:
+        source = (driver.page_source or "").lower()
+    except Exception:
+        source = ""
+
+    block_markers = (
+        "qrator",
+        "/403.php",
+        "403 forbidden",
+        "access denied",
+    )
+    return any(marker in source for marker in block_markers)
 
 
 def is_authenticated(driver: webdriver.Chrome) -> bool:
@@ -1879,27 +1912,69 @@ def main(argv: Optional[List[str]] = None) -> int:
             logger.error(f"Database error: {e}")
             return EXIT_DATABASE_ERROR
 
-        # 4. Initialize browser
-        try:
-            driver = initialize_driver(logger)
-        except WebDriverException as e:
-            logger.error(f"WebDriver error: {e}")
-            return EXIT_WEBDRIVER_ERROR
+        # 4-5. Initialize browser and authenticate.
+        # First attempt is direct; on anti-bot block retry via local proxy.
+        auth_ok = False
+        proxy_attempts: List[Optional[str]] = [None]
+        if DEFAULT_FALLBACK_PROXY:
+            proxy_attempts.append(DEFAULT_FALLBACK_PROXY)
 
-        # 5. Try cached session, then authenticate
-        if not load_cookies(driver, logger):
-            auth_success = authenticate(
-                driver=driver,
-                credentials=config["gogetlinks"],
-                anticaptcha_config=config["anticaptcha"],
-                logger=logger,
-            )
+        for attempt_no, proxy in enumerate(proxy_attempts, start=1):
+            if attempt_no > 1 and proxy:
+                logger.warning(
+                    "Direct connection appears blocked; retrying with proxy "
+                    f"{proxy}"
+                )
 
-            if not auth_success:
-                logger.error("Authentication failed")
+            # Recreate browser for each auth attempt to avoid stale state.
+            if driver is not None:
+                try:
+                    driver.quit()
+                except Exception:
+                    pass
+                driver = None
+
+            try:
+                driver = initialize_driver(logger, proxy_server=proxy)
+            except WebDriverException as e:
+                logger.error(f"WebDriver error: {e}")
+                return EXIT_WEBDRIVER_ERROR
+
+            if not load_cookies(driver, logger):
+                auth_success = authenticate(
+                    driver=driver,
+                    credentials=config["gogetlinks"],
+                    anticaptcha_config=config["anticaptcha"],
+                    logger=logger,
+                )
+
+                if not auth_success:
+                    blocked = is_anti_bot_blocked(driver)
+                    if blocked and proxy is None and DEFAULT_FALLBACK_PROXY:
+                        logger.warning(
+                            "Anti-bot block detected after direct auth attempt"
+                        )
+                        continue
+
+                    logger.error("Authentication failed")
+                    return EXIT_AUTH_FAILED
+
+                save_cookies(driver, logger)
+
+            if is_anti_bot_blocked(driver):
+                if proxy is None and DEFAULT_FALLBACK_PROXY:
+                    logger.warning("Anti-bot block detected on direct connection")
+                    continue
+
+                logger.error("Access blocked by anti-bot page")
                 return EXIT_AUTH_FAILED
 
-            save_cookies(driver, logger)
+            auth_ok = True
+            break
+
+        if not auth_ok:
+            logger.error("Authentication failed")
+            return EXIT_AUTH_FAILED
 
         # 6. Parse task list
         tasks = parse_task_list(driver, logger, conn)

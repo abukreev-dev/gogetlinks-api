@@ -13,6 +13,7 @@ from gogetlinks_parser import (
     parse_task_row,
     parse_task_details,
     sanitize_text,
+    is_anti_bot_blocked,
 )
 
 
@@ -194,3 +195,25 @@ class TestHTMLCleaning:
         """Тест обработки пустой строки."""
         assert sanitize_text("") == ""
         assert sanitize_text("   ") == ""
+
+
+class TestAntiBotDetection:
+    """Тесты детекта антибот-блокировки."""
+
+    def test_detects_403_url(self):
+        driver = Mock()
+        driver.current_url = "https://gogetlinks.net/403.php"
+        driver.page_source = "<html></html>"
+        assert is_anti_bot_blocked(driver) is True
+
+    def test_detects_qrator_marker(self):
+        driver = Mock()
+        driver.current_url = "https://gogetlinks.net/"
+        driver.page_source = "<html><body>QRATOR protection</body></html>"
+        assert is_anti_bot_blocked(driver) is True
+
+    def test_returns_false_for_normal_page(self):
+        driver = Mock()
+        driver.current_url = "https://gogetlinks.net/"
+        driver.page_source = "<html><a href='/user/signIn'>Войти</a></html>"
+        assert is_anti_bot_blocked(driver) is False
