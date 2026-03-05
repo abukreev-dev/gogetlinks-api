@@ -1363,89 +1363,8 @@ def set_my_sites_count_in_page(driver: webdriver.Chrome, logger: logging.Logger)
         logger.warning(f"Failed to set mySites page size via POST: {e}")
 
 
-def extract_reject_link(status_cell: WebElement) -> Optional[str]:
-    """Extract rejection details URL from status cell."""
-    try:
-        links = status_cell.find_elements(By.TAG_NAME, "a")
-        for link in links:
-            href = link.get_attribute("href")
-            if href:
-                return href
-    except Exception:
-        pass
-    return None
-
-
-def fetch_reject_description(
-    driver: webdriver.Chrome,
-    details_url: str,
-    logger: logging.Logger,
-) -> Optional[str]:
-    """Open rejection page in new tab and extract reason text."""
-    if not details_url:
-        return None
-
-    original_handle = driver.current_window_handle
-    initial_handles = driver.window_handles[:]
-
-    try:
-        driver.execute_script("window.open(arguments[0], '_blank');", details_url)
-
-        wait = WebDriverWait(driver, PAGE_LOAD_TIMEOUT)
-        wait.until(lambda d: len(d.window_handles) > len(initial_handles))
-
-        new_handles = [h for h in driver.window_handles if h not in initial_handles]
-        if len(new_handles) == 0:
-            return None
-
-        reject_handle = new_handles[-1]
-        driver.switch_to.window(reject_handle)
-        wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
-        time.sleep(0.4)
-
-        selectors = [
-            ".reject-reason",
-            ".reason",
-            ".alert-danger",
-            ".modal-body",
-            ".panel-body",
-            ".content",
-            ".text",
-            "body",
-        ]
-        for selector in selectors:
-            elements = driver.find_elements(By.CSS_SELECTOR, selector)
-            for element in elements:
-                text = sanitize_text(element.text)
-                if len(text) >= 10:
-                    return text
-
-        return None
-
-    except Exception as e:
-        logger.debug(
-            f"Failed to fetch reject description from {details_url}: "
-            f"{type(e).__name__}: {e}"
-        )
-        return None
-
-    finally:
-        try:
-            current_handle = driver.current_window_handle
-            if current_handle != original_handle:
-                driver.close()
-                driver.switch_to.window(original_handle)
-        except Exception:
-            try:
-                driver.switch_to.window(original_handle)
-            except Exception:
-                pass
-
-
 def parse_site_row(
     row: WebElement,
-    driver: webdriver.Chrome,
-    logger: logging.Logger,
 ) -> Optional[Dict[str, Any]]:
     """Parse one row from /mySites table."""
     cells = row.find_elements(By.TAG_NAME, "td")
@@ -1471,11 +1390,8 @@ def parse_site_row(
     traffic = extract_digits_only(sanitize_text(cells[5].text))
     trust = extract_digits_only(sanitize_text(cells[9].text))
 
+    # Reject reason parsing is intentionally disabled: keep status only.
     description = None
-    if "отклон" in status.lower():
-        reject_link = extract_reject_link(cells[1])
-        if reject_link:
-            description = fetch_reject_description(driver, reject_link, logger)
 
     return {
         "site": site.lower(),
@@ -1486,6 +1402,135 @@ def parse_site_row(
         "trust": trust,
         "description": description,
     }
+
+
+def get_my_sites_rows(driver: webdriver.Chrome) -> List[WebElement]:
+    """Return rows from mySites table that look like data rows."""
+    return [
+        row
+        for row in driver.find_elements(By.CSS_SELECTOR, "table tbody tr")
+        if len(row.find_elements(By.TAG_NAME, "td")) >= 10
+    ]
+
+
+def get_page_marker(rows: List[WebElement]) -> str:
+    """Build a simple marker to detect page change."""
+    if len(rows) == 0:
+        return ""
+
+    try:
+        first_text = sanitize_text(rows[0].text)
+        last_text = sanitize_text(rows[-1].text)
+        return f"{first_text}|{last_text}|{len(rows)}"
+    except Exception:
+        return str(len(rows))
+
+
+def go_to_next_my_sites_page(driver: webdriver.Chrome, logger: logging.Logger) -> bool:
+    """Click next page button on mySites if available."""
+    current_rows = get_my_sites_rows(driver)
+    current_marker = get_page_marker(current_rows)
+    next_button: Optional[WebElement] = None
+    next_page = None
+
+    # New GGL pagination: .pagination__item_current + links with onclick="mySites.load(N)".
+    current_page = None
+    try:
+        current_page_el = driver.find_element(
+            By.CSS_SELECTOR, ".pagination .pagination__item_current"
+        )
+        current_page_text = sanitize_text(current_page_el.text)
+        if current_page_text.isdigit():
+            current_page = int(current_page_text)
+    except Exception:
+        pass
+
+    try:
+        load_links = driver.find_elements(
+            By.CSS_SELECTOR, ".pagination a[onclick*='mySites.load(']"
+        )
+        page_to_link: Dict[int, WebElement] = {}
+        for link in load_links:
+            onclick = link.get_attribute("onclick") or ""
+            match = re.search(r"mySites\.load\((\d+)\)", onclick)
+            if match:
+                page_no = int(match.group(1))
+                page_to_link[page_no] = link
+
+        if current_page is not None:
+            next_page = current_page + 1
+            next_button = page_to_link.get(next_page)
+        elif len(page_to_link) > 0:
+            next_button = page_to_link[sorted(page_to_link.keys())[0]]
+    except Exception:
+        pass
+
+    if next_button is None:
+        # Fallback to common next controls.
+        next_selectors = [
+            ".pagination .next:not(.disabled) a",
+            "a[rel='next']",
+            "li.next:not(.disabled) a",
+        ]
+        for selector in next_selectors:
+            try:
+                candidates = driver.find_elements(By.CSS_SELECTOR, selector)
+                for candidate in candidates:
+                    if candidate.is_displayed():
+                        next_button = candidate
+                        break
+                if next_button is not None:
+                    break
+            except Exception:
+                continue
+
+    if next_button is None:
+        return False
+
+    try:
+        # GGL pagination often works via JS callback mySites.load(page).
+        onclick = next_button.get_attribute("onclick") or ""
+        if next_page is not None and "mySites.load(" in onclick:
+            driver.execute_script("if (window.mySites) { window.mySites.load(arguments[0]); }", next_page)
+        elif "mySites.load(" in onclick:
+            match = re.search(r"mySites\.load\((\d+)\)", onclick)
+            if match:
+                driver.execute_script(
+                    "if (window.mySites) { window.mySites.load(arguments[0]); }",
+                    int(match.group(1)),
+                )
+            else:
+                driver.execute_script("arguments[0].click();", next_button)
+        else:
+            driver.execute_script("arguments[0].click();", next_button)
+
+        current_page_text = str(current_page) if current_page is not None else None
+        deadline = time.time() + (PAGE_LOAD_TIMEOUT * 3)
+
+        while time.time() < deadline:
+            try:
+                new_marker = get_page_marker(get_my_sites_rows(driver))
+                new_page_text = driver.execute_script(
+                    "const el = document.querySelector('.pagination .pagination__item_current');"
+                    "return el ? (el.textContent || '').trim() : '';"
+                ) or ""
+
+                if new_marker and new_marker != current_marker:
+                    return True
+                if current_page_text and new_page_text and new_page_text != current_page_text:
+                    return True
+                if next_page is not None and new_page_text == str(next_page):
+                    return True
+            except Exception:
+                pass
+
+            time.sleep(0.25)
+
+        logger.debug("mySites next page action did not change marker/current page")
+        return False
+    except Exception as e:
+        logger.debug(f"Failed to navigate mySites pagination: {type(e).__name__}: {e}")
+        return False
 
 
 def parse_my_sites(
@@ -1518,23 +1563,33 @@ def parse_my_sites(
             or "нет сайтов" in d.page_source.lower()
         )
 
-        rows = [
-            row
-            for row in driver.find_elements(By.CSS_SELECTOR, "table tbody tr")
-            if len(row.find_elements(By.TAG_NAME, "td")) >= 10
-        ]
-
+        rows = get_my_sites_rows(driver)
         if len(rows) == 0:
             logger.warning("No rows found on mySites page")
             return []
 
-        sites: List[Dict[str, Any]] = []
-        for row in rows:
-            site_data = parse_site_row(row, driver, logger)
-            if site_data:
-                sites.append(site_data)
+        sites_by_host: Dict[str, Dict[str, Any]] = {}
+        page_num = 1
 
-        logger.info(f"mySites parsed: {len(sites)} sites")
+        while True:
+            page_rows = get_my_sites_rows(driver)
+            for row in page_rows:
+                site_data = parse_site_row(row)
+                if site_data:
+                    sites_by_host[site_data["site"]] = site_data
+
+            logger.info(
+                f"mySites page {page_num}: rows={len(page_rows)}, "
+                f"accumulated={len(sites_by_host)}"
+            )
+
+            if not go_to_next_my_sites_page(driver, logger):
+                break
+
+            page_num += 1
+
+        sites = list(sites_by_host.values())
+        logger.info(f"mySites parsed: {len(sites)} sites across {page_num} page(s)")
         return sites
 
     except TimeoutException:
