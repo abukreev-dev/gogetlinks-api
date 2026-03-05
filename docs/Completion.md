@@ -217,7 +217,7 @@ def send_alert(subject, body):
     # - No successful run in 12 hours
 ```
 
-**Telegram Notifications (Implemented in v1.2.1):**
+**Telegram Notifications (Implemented in v1.2.2):**
 - New task notifications from `/webTask` (supports `mention`)
 - Site status-change notifications from `/mySites` (without mentions)
 - Both use the same bot and chat from `[telegram]` in `config.ini`
@@ -302,7 +302,7 @@ gogetlinks-api/
 2. Write tests for new code
 3. Update documentation
 4. Create PR with description
-5. Tag release after merge: `git tag v1.2.1`
+5. Tag release after merge: `git tag v1.2.2`
 
 ### For QA Team
 
@@ -325,6 +325,6 @@ cp config.ini config_test.ini
 
 ---
 
-**Deployment Version:** 1.2.1  
+**Deployment Version:** 1.2.2  
 **Estimated Deployment Time:** 40 minutes  
 **Rollback Time:** 10 minutes

@@ -260,7 +260,7 @@ cp /path/to/cc-toolkit/CLAUDE.md ./
 |-------|----------|----------|
 | **MVP (v1.0)** | Auth + parsing + MySQL | ✅ Готово |
 | **v1.1** | Detail parsing + Telegram-уведомления | ✅ Готово |
-| **v1.2.1** | Cookie session persistence + mySites metrics + status alerts | ✅ Готово |
+| **v1.2.2** | Cookie + mySites + статусы + lock от параллельных запусков | ✅ Готово |
 | **v1.3** | Пагинация + фильтрация | 🔄 Планируется |
 | **v2.0** | Web dashboard | 🔄 Планируется |
 
@@ -355,10 +355,10 @@ make run
 
 ---
 
-**Статус:** ✅ v1.2.1 — cookie + mySites + статус-уведомления
+**Статус:** ✅ v1.2.2 — cookie + mySites + статусы + lock
 
 ---
 
 *Создано: 2026-02-05*
-*Версия: 1.2.1*
-*Обновлено: 2026-02-23 — v1.2 с cookie session persistence*
+*Версия: 1.2.2*
+*Обновлено: 2026-03-05 — v1.2.2 с lock для mySites*

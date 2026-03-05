@@ -21,6 +21,7 @@ Exit Codes:
 import configparser
 import argparse
 import html
+import json
 import logging
 import os
 import pickle
@@ -59,6 +60,10 @@ TASK_DETAIL_URL = "https://gogetlinks.net/template/view_task.php?curr_id={}"
 MY_SITES_URL = "https://gogetlinks.net/mySites"
 MY_SITES_CHANGE_COUNT_URL = "https://gogetlinks.net/mySites/changeCountInPage"
 DEFAULT_FALLBACK_PROXY = os.getenv("GGL_FALLBACK_PROXY", "127.0.0.1:3128").strip()
+SITES_LOCK_FILE = os.getenv(
+    "GGL_SITES_LOCK_FILE", "/tmp/gogetlinks_mysites.lock"
+).strip()
+SITES_LOCK_TTL_SECONDS = 3 * 60 * 60  # 3 hours
 
 # Database objects
 DB_SCHEMA = "ddl"
@@ -255,6 +260,121 @@ def setup_logger(
     logger.addHandler(console_handler)
 
     return logger
+
+
+def is_pid_alive(pid: int) -> bool:
+    """Return True if process with PID exists, False otherwise."""
+    if pid <= 0:
+        return False
+
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def acquire_sites_lock(
+    logger: logging.Logger,
+    lock_file: str = SITES_LOCK_FILE,
+    ttl_seconds: int = SITES_LOCK_TTL_SECONDS,
+) -> tuple[bool, str]:
+    """Acquire lock for mySites stage.
+
+    Returns:
+        (acquired, reason)
+    """
+    current_pid = os.getpid()
+    now = time.time()
+    payload = {
+        "pid": current_pid,
+        "started_at": now,
+        "mode": "sites",
+    }
+
+    for _ in range(2):
+        try:
+            fd = os.open(lock_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(payload, f)
+            return True, "acquired"
+        except FileExistsError:
+            pass
+
+        try:
+            with open(lock_file, "r", encoding="utf-8") as f:
+                existing = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            continue
+
+        owner_pid = int(existing.get("pid", 0) or 0)
+        started_at = float(existing.get("started_at", 0.0) or 0.0)
+        if started_at <= 0:
+            try:
+                started_at = os.path.getmtime(lock_file)
+            except OSError:
+                started_at = now
+
+        age_seconds = max(0.0, now - started_at)
+        owner_alive = is_pid_alive(owner_pid)
+
+        if owner_alive:
+            return False, (
+                f"active lock held by pid={owner_pid} "
+                f"(age={int(age_seconds)}s)"
+            )
+
+        if age_seconds > ttl_seconds:
+            logger.warning(
+                "Found stale mySites lock: "
+                f"pid={owner_pid}, age={int(age_seconds)}s; removing"
+            )
+            try:
+                os.remove(lock_file)
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                return False, f"failed to remove stale lock: {e}"
+            continue
+
+        return False, (
+            f"dead lock owner pid={owner_pid}, age={int(age_seconds)}s "
+            f"(ttl={ttl_seconds}s)"
+        )
+
+    return False, "lock exists and could not be acquired"
+
+
+def release_sites_lock(
+    logger: logging.Logger,
+    lock_file: str = SITES_LOCK_FILE,
+) -> None:
+    """Release mySites lock if owned by current process."""
+    current_pid = os.getpid()
+
+    try:
+        with open(lock_file, "r", encoding="utf-8") as f:
+            existing = json.load(f)
+    except FileNotFoundError:
+        return
+    except (json.JSONDecodeError, OSError) as e:
+        logger.warning(f"Failed to read mySites lock for release: {e}")
+        return
+
+    owner_pid = int(existing.get("pid", 0) or 0)
+    if owner_pid != current_pid:
+        logger.warning(
+            "Skip releasing mySites lock owned by another pid: "
+            f"{owner_pid}"
+        )
+        return
+
+    try:
+        os.remove(lock_file)
+    except FileNotFoundError:
+        return
+    except OSError as e:
+        logger.warning(f"Failed to remove mySites lock: {e}")
 
 
 # =============================================================================
@@ -1989,6 +2109,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     logger = None
     conn = None
     driver = None
+    sites_lock_acquired = False
 
     try:
         args = parse_cli_args(argv)
@@ -2021,6 +2142,16 @@ def main(argv: Optional[List[str]] = None) -> int:
             log_file=config["logging"]["log_file"],
             log_level=config["logging"]["log_level"],
         )
+
+        # Acquire mySites lock only for runs that include /mySites stage.
+        if not args.skip_sites:
+            sites_lock_acquired, lock_reason = acquire_sites_lock(logger)
+            if not sites_lock_acquired:
+                logger.warning(
+                    "Skipping run because mySites lock is active: "
+                    f"{lock_reason}"
+                )
+                return EXIT_SUCCESS
 
         # 3. Connect to database
         try:
@@ -2167,6 +2298,9 @@ def main(argv: Optional[List[str]] = None) -> int:
 
         if conn:
             close_database(conn, logger)
+
+        if logger and sites_lock_acquired:
+            release_sites_lock(logger)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,23 @@
 # Changelog
 
+## 2026-03-05 - v1.2.2: mySites Run Lock (Anti-Overlap)
+
+### Features
+- ✅ Added lock for `/mySites` stage to avoid parallel runs
+- ✅ Added stale-lock auto cleanup (TTL 3 hours + dead PID check)
+- ✅ Added environment override for lock path: `GGL_SITES_LOCK_FILE`
+
+### Changes
+- Runs that include `/mySites` now acquire a lock file (`/tmp/gogetlinks_mysites.lock`)
+- If lock is active, run is skipped gracefully with exit code `0`
+- `--skip-sites` runs do not acquire the lock
+
+### Tests
+- ✅ Added `tests/test_locking.py`
+- ✅ 84 passed, 1 skipped
+
+---
+
 ## 2026-03-05 - v1.2.1: mySites Metrics + Status Alerts + Split Schedule
 
 ### Features

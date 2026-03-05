@@ -80,7 +80,7 @@ cp gogetlinks-parser-cc-toolkit/CLAUDE.md ./
 |-------|----------|----------|
 | **MVP (v1.0)** | Auth + parsing + MySQL | Week 1-2 |
 | **v1.1-v1.2** | Detail parsing + Telegram + session persist | Week 3-4 |
-| **v1.2.1 (current)** | mySites metrics + status alerts + split schedule | Done |
+| **v1.2.2 (current)** | mySites metrics + status alerts + run lock | Done |
 | **v2.0** | Web dashboard + notifications | Month 2+ |
 
 ---
@@ -152,11 +152,11 @@ A: `--skip-sites` для ежечасного поиска задач, `--skip-t
 
 ---
 
-**Status:** ✅ UP TO DATE (v1.2.1)
+**Status:** ✅ UP TO DATE (v1.2.2)
 
 Вся документация готова. Все инструменты созданы. Можно начинать разработку!
 
 ---
 
 *Generated: 2026-03-05*  
-*Version: 1.2.1*
+*Version: 1.2.2*
