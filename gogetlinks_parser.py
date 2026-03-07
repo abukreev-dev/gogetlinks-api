@@ -1800,7 +1800,7 @@ def save_sites_to_db(
             old_status_raw = existing_status_map.get(host, "")
             old_status = sanitize_text(old_status_raw) if old_status_raw else ""
 
-            if host and old_status != new_status:
+            if host and host in existing_status_map and old_status != new_status:
                 status_changes.append(
                     {
                         "site": host,

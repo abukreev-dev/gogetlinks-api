@@ -1,5 +1,12 @@
 # CLAUDE.md
 
+Пиши на русском языке
+
+## Правила MySQL через SSH
+При выполнении SQL через ssh ddl использовать формат:
+ssh ddl 'mysql ddl -N -e "SQL запрос здесь"'
+Внешние кавычки одинарные, внутренние двойные.
+
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Project
@@ -65,3 +72,19 @@ Detailed rules live in `.claude/rules/` (coding-style, git-workflow, testing, se
 - Telegram section in config is optional (fallback defaults if missing)
 - Session cookies saved to `session_cookies.pkl` (gitignored, chmod 600) — stale file auto-deleted on expired session
 - Tests: 72 tests with real assertions (parser, details, telegram, html cleaning, cookie session, db)
+
+## Окружения
+
+### Локальная разработка
+- Все изменения кода — только локально
+- Деплой — только через git push → GitHub → проект на сервере я обновляю вручную
+
+### Сервер (ТОЛЬКО ЧТЕНИЕ)
+- Доступ: `ssh ddl` (алиас в ~/.ssh/config)
+- Можно: смотреть логи, читать БД (SELECT), проверять статус процессов
+- НЕЛЬЗЯ: изменять файлы, редактировать конфиги, перезапускать процессы,
+  устанавливать пакеты, писать в БД, удалять что-либо
+
+Правило: если задача требует изменений на сервере — делай локально и деплой через git.
+Если нужны изменения на сервере - пиши что нужно сделать пошагово вручную.
+
