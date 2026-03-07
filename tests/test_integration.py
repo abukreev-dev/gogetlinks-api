@@ -10,11 +10,15 @@ from unittest.mock import Mock, patch, MagicMock
 from gogetlinks_parser import (
     format_telegram_message,
     format_status_changes_message,
+    format_no_new_tasks_message,
     send_telegram_notification,
     send_status_changes_notification,
+    send_no_new_tasks_notification,
+    get_days_since_last_new_task,
     save_cookies,
     load_cookies,
     COOKIE_FILE,
+    NO_NEW_TASKS_THRESHOLD_DAYS,
 )
 
 
@@ -427,3 +431,108 @@ class TestErrorRecovery:
         """Тест корректного завершения при ошибке."""
         # TODO: Реализовать cleanup в finally
         pass
+
+
+class TestNoNewTasksAlert:
+    """Тесты уведомления об отсутствии новых задач"""
+
+    def test_format_message_contains_days(self):
+        """Тест что количество дней включено в сообщение."""
+        message = format_no_new_tasks_message(7)
+
+        assert "7 дней" in message
+
+    def test_format_message_contains_link(self):
+        """Тест что ссылка на задачи включена в сообщение."""
+        message = format_no_new_tasks_message(5)
+
+        assert "https://gogetlinks.net/webTask" in message
+
+    def test_format_message_with_mention(self):
+        """Тест что mention включается в сообщение."""
+        message = format_no_new_tasks_message(5, mention="@user1 @user2")
+
+        assert "@user1 @user2" in message
+
+    def test_format_message_without_mention(self):
+        """Тест сообщения без mention."""
+        message = format_no_new_tasks_message(5)
+
+        assert message.endswith("</a>")
+
+    @patch("gogetlinks_parser.requests.post")
+    def test_send_notification_success(self, mock_post, telegram_config, logger):
+        """Тест успешной отправки уведомления."""
+        mock_response = Mock()
+        mock_response.json.return_value = {"ok": True}
+        mock_response.raise_for_status.return_value = None
+        mock_post.return_value = mock_response
+
+        result = send_no_new_tasks_notification(7, telegram_config, logger)
+
+        assert result is True
+        mock_post.assert_called_once()
+        payload = mock_post.call_args[1]["json"]
+        assert "7 дней" in payload["text"]
+
+    @patch("gogetlinks_parser.requests.post")
+    def test_send_notification_with_mention(self, mock_post, telegram_config, logger):
+        """Тест что mention из конфига попадает в сообщение."""
+        telegram_config["telegram"]["mention"] = "@admin"
+        mock_response = Mock()
+        mock_response.json.return_value = {"ok": True}
+        mock_response.raise_for_status.return_value = None
+        mock_post.return_value = mock_response
+
+        result = send_no_new_tasks_notification(10, telegram_config, logger)
+
+        assert result is True
+        payload = mock_post.call_args[1]["json"]
+        assert "@admin" in payload["text"]
+
+    def test_send_notification_disabled(self, telegram_config, logger):
+        """Тест что уведомление не отправляется если Telegram выключен."""
+        telegram_config["telegram"]["enabled"] = False
+
+        result = send_no_new_tasks_notification(7, telegram_config, logger)
+
+        assert result is False
+
+    def test_get_days_returns_int(self, logger):
+        """Тест что get_days_since_last_new_task возвращает int."""
+        mock_conn = Mock()
+        mock_cursor = Mock()
+        mock_conn.cursor.return_value = mock_cursor
+        mock_cursor.fetchone.return_value = (3,)
+
+        result = get_days_since_last_new_task(mock_conn, logger)
+
+        assert result == 3
+
+    def test_get_days_empty_table(self, logger):
+        """Тест для пустой таблицы."""
+        mock_conn = Mock()
+        mock_cursor = Mock()
+        mock_conn.cursor.return_value = mock_cursor
+        mock_cursor.fetchone.return_value = (None,)
+
+        result = get_days_since_last_new_task(mock_conn, logger)
+
+        assert result is None
+
+    def test_get_days_db_error(self, logger):
+        """Тест обработки ошибки БД."""
+        import mysql.connector
+
+        mock_conn = Mock()
+        mock_cursor = Mock()
+        mock_conn.cursor.return_value = mock_cursor
+        mock_cursor.execute.side_effect = mysql.connector.Error("conn lost")
+
+        result = get_days_since_last_new_task(mock_conn, logger)
+
+        assert result is None
+
+    def test_threshold_constant(self):
+        """Тест значения порога."""
+        assert NO_NEW_TASKS_THRESHOLD_DAYS == 5

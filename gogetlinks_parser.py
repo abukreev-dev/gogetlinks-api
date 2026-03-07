@@ -104,6 +104,9 @@ SELECTOR_MODAL_CLOSE = "a[rel='modal:close']"
 # Rate limiting for detail parsing
 DETAIL_REQUEST_DELAY = 1.5
 
+# Stale tasks alert
+NO_NEW_TASKS_THRESHOLD_DAYS = 5
+
 # Session persistence
 COOKIE_FILE = "session_cookies.pkl"
 
@@ -571,6 +574,34 @@ def close_database(conn: MySQLConnection, logger: logging.Logger) -> None:
     if conn and conn.is_connected():
         conn.close()
         logger.info("Database connection closed")
+
+
+def get_days_since_last_new_task(
+    conn: MySQLConnection, logger: logging.Logger
+) -> Optional[int]:
+    """Return number of whole days since the last new task was inserted.
+
+    Args:
+        conn: MySQL connection
+        logger: Logger instance
+
+    Returns:
+        Number of days since last new task, or None if table is empty or query fails
+    """
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            f"SELECT DATEDIFF(NOW(), MAX(created_at)) FROM {DB_FULL_TABLE}"
+        )
+        row = cursor.fetchone()
+        if row is None or row[0] is None:
+            return None
+        return int(row[0])
+    except mysql.connector.Error as e:
+        logger.error(f"Failed to check last new task age: {e}")
+        return None
+    finally:
+        cursor.close()
 
 
 # =============================================================================
@@ -2079,6 +2110,88 @@ def send_status_changes_notification(
         return False
 
 
+def format_no_new_tasks_message(days: int, mention: str = "") -> str:
+    """Format alert about no new tasks for a long time.
+
+    Args:
+        days: Number of days since last new task
+        mention: Telegram usernames to mention
+
+    Returns:
+        HTML-formatted message string
+    """
+    lines = [
+        f"<b>Нет новых задач уже {days} дней</b>",
+        "",
+        "Последняя новая задача на GoGetLinks появилась "
+        f"{days} дней назад. Возможно, стоит проверить вручную.",
+        "",
+        '<a href="https://gogetlinks.net/webTask">Открыть задачи</a>',
+    ]
+
+    if mention:
+        lines.append(mention)
+
+    return "\n".join(lines)
+
+
+def send_no_new_tasks_notification(
+    days: int,
+    config: Dict[str, Any],
+    logger: logging.Logger,
+) -> bool:
+    """Send Telegram alert when no new tasks for too long.
+
+    Args:
+        days: Number of days since last new task
+        config: Application configuration
+        logger: Logger instance
+
+    Returns:
+        True if message sent successfully, False otherwise
+    """
+    telegram_config = config["telegram"]
+
+    if not telegram_config.get("enabled"):
+        logger.debug("Telegram notifications disabled")
+        return False
+
+    bot_token = telegram_config.get("bot_token", "")
+    chat_id = telegram_config.get("chat_id", "")
+
+    if not bot_token or not chat_id:
+        logger.warning("Telegram bot_token or chat_id not configured")
+        return False
+
+    mention = telegram_config.get("mention", "")
+    message = format_no_new_tasks_message(days, mention)
+    url = TELEGRAM_API_URL.format(bot_token)
+
+    payload = {
+        "chat_id": chat_id,
+        "text": message,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }
+
+    try:
+        response = requests.post(url, json=payload, timeout=30)
+        response.raise_for_status()
+        result = response.json()
+
+        if result.get("ok"):
+            logger.info(
+                f"Telegram no-new-tasks alert sent ({days} days)"
+            )
+            return True
+
+        logger.error(f"Telegram API error: {result.get('description')}")
+        return False
+    except requests.RequestException as e:
+        logger.error(f"Failed to send no-new-tasks notification: {e}")
+        return False
+
+
 # =============================================================================
 # MAIN
 # =============================================================================
@@ -2269,6 +2382,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                 f"parsed={len(sites)}, updated={updated_sites}, "
                 f"status_changed={len(status_changes)}"
             )
+
+            # 11. Check if no new tasks for too long
+            days = get_days_since_last_new_task(conn, logger)
+            if days is not None and days >= NO_NEW_TASKS_THRESHOLD_DAYS:
+                logger.warning(f"No new tasks for {days} days")
+                send_no_new_tasks_notification(days, config, logger)
+            elif days is not None:
+                logger.debug(f"Last new task was {days} day(s) ago")
 
         logger.info("Parsing completed successfully")
         return EXIT_SUCCESS
