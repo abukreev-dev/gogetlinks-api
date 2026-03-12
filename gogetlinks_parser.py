@@ -987,7 +987,22 @@ def authenticate(
         if captcha_token:
             logger.debug("Injecting captcha token")
             driver.execute_script(
-                f"document.getElementById('g-recaptcha-response').innerHTML = '{captcha_token}';"
+                """
+                var textarea = document.getElementById('g-recaptcha-response');
+                if (textarea) {
+                    textarea.value = arguments[0];
+                    textarea.innerHTML = arguments[0];
+                }
+                // Call reCAPTCHA callback if defined
+                var recaptchaEl = document.querySelector('.g-recaptcha[data-callback]');
+                if (recaptchaEl) {
+                    var cbName = recaptchaEl.getAttribute('data-callback');
+                    if (cbName && typeof window[cbName] === 'function') {
+                        window[cbName](arguments[0]);
+                    }
+                }
+                """,
+                captcha_token,
             )
 
         # Submit form - find button (it may be disabled initially)
@@ -1012,14 +1027,27 @@ def authenticate(
 
         logger.debug("Form submitted successfully")
 
-        # Wait for page load and verify authentication
-        time.sleep(3)
+        # Wait for page to change after form submission (up to 15s)
+        auth_timeout = 15
+        logger.debug(f"Waiting up to {auth_timeout}s for auth redirect")
+        try:
+            WebDriverWait(driver, auth_timeout).until(
+                lambda d: is_authenticated(d)
+                or SELECTOR_LOGIN_BUTTON not in d.page_source
+            )
+        except TimeoutException:
+            logger.debug("Auth redirect wait timed out")
 
         if is_authenticated(driver):
             logger.info("Authentication successful")
             return True
         else:
-            logger.error("Authentication failed - credentials may be incorrect")
+            current_url = driver.current_url
+            page_title = driver.title
+            logger.error(
+                f"Authentication failed - credentials may be incorrect "
+                f"(url={current_url}, title={page_title})"
+            )
             return False
 
     except TimeoutException as e:
@@ -2302,19 +2330,39 @@ def main(argv: Optional[List[str]] = None) -> int:
                 return EXIT_WEBDRIVER_ERROR
 
             if not load_cookies(driver, logger):
-                auth_success = authenticate(
-                    driver=driver,
-                    credentials=config["gogetlinks"],
-                    anticaptcha_config=config["anticaptcha"],
-                    logger=logger,
-                )
+                max_auth_retries = 2
+                auth_success = False
+                for auth_try in range(1, max_auth_retries + 1):
+                    auth_success = authenticate(
+                        driver=driver,
+                        credentials=config["gogetlinks"],
+                        anticaptcha_config=config["anticaptcha"],
+                        logger=logger,
+                    )
+                    if auth_success:
+                        break
 
-                if not auth_success:
                     blocked = is_anti_bot_blocked(driver)
                     if blocked and proxy is None and DEFAULT_FALLBACK_PROXY:
                         logger.warning(
                             "Anti-bot block detected after direct auth attempt"
                         )
+                        break
+
+                    if auth_try < max_auth_retries:
+                        logger.warning(
+                            f"Auth attempt {auth_try}/{max_auth_retries} failed, "
+                            "retrying with fresh browser..."
+                        )
+                        try:
+                            driver.quit()
+                        except Exception:
+                            pass
+                        driver = initialize_driver(logger, proxy_server=proxy)
+                        continue
+
+                if not auth_success:
+                    if is_anti_bot_blocked(driver) and proxy is None and DEFAULT_FALLBACK_PROXY:
                         continue
 
                     logger.error("Authentication failed")
