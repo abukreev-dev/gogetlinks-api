@@ -2177,7 +2177,10 @@ def check_links(
     """
     cursor = conn.cursor(dictionary=True)
     try:
-        cursor.execute(f"SELECT id, url FROM {DB_FULL_LINKS_TABLE}")
+        cursor.execute(
+            f"SELECT id, url FROM {DB_FULL_LINKS_TABLE}"
+            " WHERE date_paid >= '2025-01-01' OR date_paid IS NULL"
+        )
         rows = cursor.fetchall()
     finally:
         cursor.close()
