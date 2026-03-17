@@ -2721,18 +2721,17 @@ def main(argv: Optional[List[str]] = None) -> int:
             return EXIT_SUCCESS
 
         # 4-5. Initialize browser and authenticate.
-        # First attempt is direct; on anti-bot block retry via local proxy.
+        # Skip direct connection attempt — go straight to proxy if configured.
         auth_ok = False
-        proxy_attempts: List[Optional[str]] = [None]
+        proxy_attempts: List[Optional[str]] = []
         if DEFAULT_FALLBACK_PROXY:
             proxy_attempts.append(DEFAULT_FALLBACK_PROXY)
+        if not proxy_attempts:
+            proxy_attempts.append(None)  # fallback: direct only if no proxy set
 
-        for attempt_no, proxy in enumerate(proxy_attempts, start=1):
-            if attempt_no > 1 and proxy:
-                logger.warning(
-                    "Direct connection appears blocked; retrying with proxy "
-                    f"{proxy}"
-                )
+        for proxy in proxy_attempts:
+            if proxy:
+                logger.info(f"Connecting via proxy {proxy}")
 
             # Recreate browser for each auth attempt to avoid stale state.
             if driver is not None:
@@ -2761,13 +2760,6 @@ def main(argv: Optional[List[str]] = None) -> int:
                     if auth_success:
                         break
 
-                    blocked = is_anti_bot_blocked(driver)
-                    if blocked and proxy is None and DEFAULT_FALLBACK_PROXY:
-                        logger.warning(
-                            "Anti-bot block detected after direct auth attempt"
-                        )
-                        break
-
                     if auth_try < max_auth_retries:
                         logger.warning(
                             f"Auth attempt {auth_try}/{max_auth_retries} failed, "
@@ -2781,19 +2773,12 @@ def main(argv: Optional[List[str]] = None) -> int:
                         continue
 
                 if not auth_success:
-                    if is_anti_bot_blocked(driver) and proxy is None and DEFAULT_FALLBACK_PROXY:
-                        continue
-
                     logger.error("Authentication failed")
                     return EXIT_AUTH_FAILED
 
                 save_cookies(driver, logger)
 
             if is_anti_bot_blocked(driver):
-                if proxy is None and DEFAULT_FALLBACK_PROXY:
-                    logger.warning("Anti-bot block detected on direct connection")
-                    continue
-
                 logger.error("Access blocked by anti-bot page")
                 return EXIT_AUTH_FAILED
 
