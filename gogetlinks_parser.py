@@ -1949,6 +1949,7 @@ def download_csv_export(
     download_url: str,
     post_data: Dict[str, str],
     logger: logging.Logger,
+    referer: Optional[str] = None,
 ) -> Optional[str]:
     """Download CSV export via POST and return decoded text.
 
@@ -1957,12 +1958,18 @@ def download_csv_export(
         download_url: URL of the CSV download endpoint
         post_data: form fields to send (checkbox names)
         logger: Logger instance
+        referer: Referer header value (page the export was initiated from)
 
     Returns:
         CSV text (decoded from windows-1251) or None on error
     """
     try:
-        resp = session.post(download_url, data=post_data, timeout=30)
+        headers = {}
+        if referer:
+            headers["Referer"] = referer
+        resp = session.post(
+            download_url, data=post_data, timeout=30, headers=headers
+        )
         resp.raise_for_status()
 
         content_type = resp.headers.get("Content-Type", "")
@@ -2113,12 +2120,18 @@ def sync_links(
 
     all_links: List[Dict[str, Any]] = []
 
-    # Download paid links CSV
+    # Navigate to paid page first (establishes session context),
+    # then download CSV with Referer header
+    logger.info("Navigating to paid links page")
+    driver.get(PAID_LINKS_URL)
+    time.sleep(2)
+
     paid_csv = download_csv_export(
         session,
         CSV_DOWNLOAD_PAID_URL,
         {"url": "true", "date_paid": "true"},
         logger,
+        referer=PAID_LINKS_URL,
     )
     if paid_csv:
         all_links.extend(parse_links_csv(paid_csv, "paid", logger))
@@ -2126,12 +2139,17 @@ def sync_links(
         logger.error("Failed to download paid links CSV")
         return False
 
-    # Download wait_indexation links CSV
+    # Navigate to wait_indexation page, then download CSV
+    logger.info("Navigating to wait_indexation links page")
+    driver.get(WAIT_INDEXATION_URL)
+    time.sleep(2)
+
     wait_csv = download_csv_export(
         session,
         CSV_DOWNLOAD_WAIT_URL,
         {"url": "true"},
         logger,
+        referer=WAIT_INDEXATION_URL,
     )
     if wait_csv:
         all_links.extend(parse_links_csv(wait_csv, "wait_indexation", logger))
