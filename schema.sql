@@ -44,9 +44,23 @@ CREATE TABLE IF NOT EXISTS ddl.ggl_tasks (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 COMMENT='Задачи с gogetlinks.net';
 
+-- Создание таблицы оплаченных ссылок
+CREATE TABLE IF NOT EXISTS ddl.ggl_links (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    url VARCHAR(500) NOT NULL COMMENT 'URL размещённой ссылки',
+    date_paid DATE DEFAULT NULL COMMENT 'Дата оплаты',
+    status ENUM('paid', 'wait_indexation') NOT NULL COMMENT 'Статус ссылки',
+    last_check_at DATETIME DEFAULT NULL COMMENT 'Время последней HTTP-проверки',
+    last_check_code INT DEFAULT NULL COMMENT 'HTTP-код последней проверки',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_url (url)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+COMMENT='Оплаченные ссылки с gogetlinks.net';
+
 -- Создание пользователя для парсера (выполните отдельно с правами root)
 -- CREATE USER 'gogetlinks_parser'@'localhost' IDENTIFIED BY 'STRONG_PASSWORD_HERE';
--- GRANT SELECT, INSERT, UPDATE ON ddl.* TO 'gogetlinks_parser'@'localhost';
+-- GRANT SELECT, INSERT, UPDATE, DELETE ON ddl.* TO 'gogetlinks_parser'@'localhost';
 -- FLUSH PRIVILEGES;
 
 -- Проверка создания таблицы

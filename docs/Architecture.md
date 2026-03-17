@@ -616,6 +616,19 @@ grep -E "Exit code: [^0]" gogetlinks_parser_cron.log
 grep "Total execution time" logs/gogetlinks_parser.log | awk '{print $NF}' | sort -nr | head
 ```
 
+## Gotchas (Quick Reference)
+
+- Auth uses **modal-based login form** (`rel='modal:open'`), not a standalone page
+- Captcha solving is **optional** — parser continues if no captcha detected
+- Site returns **Windows-1251** encoding
+- Detail modal opened via `$.get(TASK_DETAIL_URL)` + jQuery `.modal()` — old modals must be removed before opening new ones
+- Detail modal DOM: `.tv_params_block` blocks with `.block_title` headers; URL in `#copy_url` input; params in `.param .block_name/.block_value` pairs
+- Title in list view is task type from `.site-link__campaign` (e.g. "Заметка", "Контекстная ссылка"), not a descriptive title
+- `insert_or_update_task()` returns `Optional[bool]`: `True`=new, `False`=updated, `None`=error
+- Telegram section in config is optional (fallback defaults if missing)
+- Session cookies saved to `session_cookies.pkl` (gitignored, chmod 600) — stale file auto-deleted on expired session
+- Tests: 72 tests with real assertions (parser, details, telegram, html cleaning, cookie session, db)
+
 ---
 
 **Architecture Version:** 1.0 (MVP)  

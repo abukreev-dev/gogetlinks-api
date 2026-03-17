@@ -30,8 +30,10 @@ import sys
 import time
 from decimal import Decimal, InvalidOperation
 from logging.handlers import RotatingFileHandler
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
+import csv
+import io
 
 import mysql.connector
 import requests
@@ -59,6 +61,16 @@ TASK_LIST_URL = "https://gogetlinks.net/webTask/index"
 TASK_DETAIL_URL = "https://gogetlinks.net/template/view_task.php?curr_id={}"
 MY_SITES_URL = "https://gogetlinks.net/mySites"
 MY_SITES_CHANGE_COUNT_URL = "https://gogetlinks.net/mySites/changeCountInPage"
+
+# Links export URLs
+PAID_LINKS_URL = "https://gogetlinks.net/webTask/index/action/viewPaid"
+WAIT_INDEXATION_URL = "https://gogetlinks.net/webTask/index/action/viewWaitIndexation"
+CSV_DOWNLOAD_PAID_URL = (
+    "https://gogetlinks.net/template/download_csv_file.php?action=web_paid"
+)
+CSV_DOWNLOAD_WAIT_URL = (
+    "https://gogetlinks.net/template/download_csv_file.php?action=web_wait_indexation"
+)
 DEFAULT_FALLBACK_PROXY = os.getenv("GGL_FALLBACK_PROXY", "127.0.0.1:3128").strip()
 SITES_LOCK_FILE = os.getenv(
     "GGL_SITES_LOCK_FILE", "/tmp/gogetlinks_mysites.lock"
@@ -69,6 +81,8 @@ SITES_LOCK_TTL_SECONDS = 3 * 60 * 60  # 3 hours
 DB_SCHEMA = "ddl"
 DB_TABLE = "ggl_tasks"
 DB_FULL_TABLE = f"{DB_SCHEMA}.{DB_TABLE}"
+DB_LINKS_TABLE = "ggl_links"
+DB_FULL_LINKS_TABLE = f"{DB_SCHEMA}.{DB_LINKS_TABLE}"
 
 # Timeouts
 CAPTCHA_TIMEOUT = 120
@@ -76,6 +90,7 @@ CAPTCHA_POLL_INTERVAL = 5
 MAX_RETRIES = 3
 PAGE_LOAD_TIMEOUT = 10
 IMPLICIT_WAIT = 5
+LINK_CHECK_TIMEOUT = 10
 
 # Exit codes
 EXIT_SUCCESS = 0
@@ -1902,6 +1917,360 @@ def save_sites_to_db(
 
 
 # =============================================================================
+# LINKS SYNC & CHECK
+# =============================================================================
+
+
+def get_selenium_cookies_session(
+    driver: webdriver.Chrome, logger: logging.Logger
+) -> requests.Session:
+    """Create requests.Session with cookies transferred from Selenium."""
+    session = requests.Session()
+    for cookie in driver.get_cookies():
+        session.cookies.set(
+            cookie["name"], cookie["value"], domain=cookie.get("domain")
+        )
+    ua = driver.execute_script("return navigator.userAgent")
+    session.headers["User-Agent"] = ua
+    logger.debug("Transferred %d cookies to requests session", len(driver.get_cookies()))
+    return session
+
+
+def download_csv_export(
+    session: requests.Session,
+    download_url: str,
+    post_data: Dict[str, str],
+    logger: logging.Logger,
+) -> Optional[str]:
+    """Download CSV export via POST and return decoded text.
+
+    Args:
+        session: requests session with auth cookies
+        download_url: URL of the CSV download endpoint
+        post_data: form fields to send (checkbox names)
+        logger: Logger instance
+
+    Returns:
+        CSV text (decoded from windows-1251) or None on error
+    """
+    try:
+        resp = session.post(download_url, data=post_data, timeout=30)
+        resp.raise_for_status()
+
+        content_type = resp.headers.get("Content-Type", "")
+        if "text/html" in content_type and len(resp.content) > 10000:
+            logger.error(
+                "Got HTML instead of CSV from %s (possibly not authenticated)",
+                download_url,
+            )
+            return None
+
+        csv_text = resp.content.decode("windows-1251")
+        logger.info(
+            "Downloaded CSV from %s: %d bytes, %d lines",
+            download_url,
+            len(resp.content),
+            csv_text.count("\n"),
+        )
+        return csv_text
+
+    except requests.RequestException as e:
+        logger.error("Failed to download CSV from %s: %s", download_url, e)
+        return None
+
+
+def parse_links_csv(
+    csv_text: str, status: str, logger: logging.Logger
+) -> List[Dict[str, Any]]:
+    """Parse CSV export of paid/wait_indexation links.
+
+    Args:
+        csv_text: CSV content (already decoded)
+        status: 'paid' or 'wait_indexation'
+        logger: Logger instance
+
+    Returns:
+        List of dicts with keys: url, date_paid (str or None), status
+    """
+    links: List[Dict[str, Any]] = []
+    reader = csv.reader(io.StringIO(csv_text), delimiter=";", quotechar='"')
+
+    header = next(reader, None)
+    if header is None:
+        logger.warning("Empty CSV for status=%s", status)
+        return links
+
+    logger.debug("CSV header for %s: %s", status, header)
+
+    for row in reader:
+        if not row or not row[0].strip():
+            continue
+
+        url = row[0].strip().strip('"')
+        if not url.startswith("http"):
+            continue
+
+        date_paid = None
+        if status == "paid" and len(row) > 1:
+            raw_date = row[1].strip().strip('"')
+            # Format: dd.mm.yyyy → yyyy-mm-dd
+            try:
+                parts = raw_date.split(".")
+                if len(parts) == 3:
+                    date_paid = f"{parts[2]}-{parts[1]}-{parts[0]}"
+            except (IndexError, ValueError):
+                logger.debug("Could not parse date: %s", raw_date)
+
+        links.append({"url": url, "date_paid": date_paid, "status": status})
+
+    logger.info("Parsed %d links with status=%s", len(links), status)
+    return links
+
+
+def sync_links_to_db(
+    conn: MySQLConnection,
+    links: List[Dict[str, Any]],
+    logger: logging.Logger,
+) -> Tuple[int, int, int]:
+    """Sync links to ggl_links table.
+
+    Inserts new, updates existing, deletes removed links.
+
+    Returns:
+        Tuple of (inserted, updated, deleted) counts
+    """
+    if not links:
+        logger.warning("No links to sync")
+        return 0, 0, 0
+
+    cursor = conn.cursor()
+    inserted = 0
+    updated = 0
+
+    try:
+        for link in links:
+            cursor.execute(
+                f"""INSERT INTO {DB_FULL_LINKS_TABLE}
+                    (url, date_paid, status)
+                    VALUES (%s, %s, %s)
+                    ON DUPLICATE KEY UPDATE
+                        date_paid = VALUES(date_paid),
+                        status = VALUES(status)
+                """,
+                (link["url"], link["date_paid"], link["status"]),
+            )
+            if cursor.rowcount == 1:
+                inserted += 1
+            elif cursor.rowcount == 2:
+                updated += 1
+
+        # Delete links that are no longer in either list
+        all_urls = [link["url"] for link in links]
+        if all_urls:
+            placeholders = ", ".join(["%s"] * len(all_urls))
+            cursor.execute(
+                f"DELETE FROM {DB_FULL_LINKS_TABLE} WHERE url NOT IN ({placeholders})",
+                tuple(all_urls),
+            )
+            deleted = cursor.rowcount
+        else:
+            deleted = 0
+
+        conn.commit()
+        logger.info(
+            "Links sync: inserted=%d, updated=%d, deleted=%d",
+            inserted,
+            updated,
+            deleted,
+        )
+        return inserted, updated, deleted
+
+    except mysql.connector.Error as e:
+        conn.rollback()
+        logger.error("Failed to sync links: %s", e)
+        return 0, 0, 0
+
+    finally:
+        cursor.close()
+
+
+def sync_links(
+    driver: webdriver.Chrome,
+    conn: MySQLConnection,
+    logger: logging.Logger,
+) -> bool:
+    """Download paid + wait_indexation CSVs and sync to ggl_links table."""
+    session = get_selenium_cookies_session(driver, logger)
+
+    all_links: List[Dict[str, Any]] = []
+
+    # Download paid links CSV
+    paid_csv = download_csv_export(
+        session,
+        CSV_DOWNLOAD_PAID_URL,
+        {"url": "true", "date_paid": "true"},
+        logger,
+    )
+    if paid_csv:
+        all_links.extend(parse_links_csv(paid_csv, "paid", logger))
+    else:
+        logger.error("Failed to download paid links CSV")
+        return False
+
+    # Download wait_indexation links CSV
+    wait_csv = download_csv_export(
+        session,
+        CSV_DOWNLOAD_WAIT_URL,
+        {"url": "true"},
+        logger,
+    )
+    if wait_csv:
+        all_links.extend(parse_links_csv(wait_csv, "wait_indexation", logger))
+    else:
+        logger.error("Failed to download wait_indexation links CSV")
+        return False
+
+    if not all_links:
+        logger.warning("No links found in CSVs")
+        return True
+
+    sync_links_to_db(conn, all_links, logger)
+    return True
+
+
+def check_links(
+    conn: MySQLConnection,
+    config: Dict[str, Any],
+    logger: logging.Logger,
+) -> bool:
+    """Check HTTP availability of all links in ggl_links table.
+
+    Performs HEAD request for each URL, updates last_check_at/last_check_code,
+    and sends Telegram alert for non-200 responses.
+    """
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute(f"SELECT id, url FROM {DB_FULL_LINKS_TABLE}")
+        rows = cursor.fetchall()
+    finally:
+        cursor.close()
+
+    if not rows:
+        logger.info("No links to check")
+        return True
+
+    logger.info("Checking %d links", len(rows))
+    errors: List[Dict[str, Any]] = []
+
+    update_cursor = conn.cursor()
+    try:
+        for row in rows:
+            url = row["url"]
+            try:
+                resp = requests.head(url, timeout=LINK_CHECK_TIMEOUT, allow_redirects=True)
+                code = resp.status_code
+            except requests.RequestException:
+                code = 0
+
+            update_cursor.execute(
+                f"""UPDATE {DB_FULL_LINKS_TABLE}
+                    SET last_check_at = NOW(), last_check_code = %s
+                    WHERE id = %s
+                """,
+                (code, row["id"]),
+            )
+
+            if code != 200:
+                errors.append({"url": url, "code": code})
+                logger.warning("Link check failed: %s → %d", url, code)
+
+        conn.commit()
+    except mysql.connector.Error as e:
+        conn.rollback()
+        logger.error("Failed to update link check results: %s", e)
+        return False
+    finally:
+        update_cursor.close()
+
+    logger.info(
+        "Link check complete: %d total, %d errors", len(rows), len(errors)
+    )
+
+    if errors:
+        send_links_check_notification(errors, config, logger)
+
+    return True
+
+
+def format_links_check_message(errors: List[Dict[str, Any]]) -> str:
+    """Format link check errors as Telegram message."""
+    lines = [f"<b>Проблемы с доступом оплаченных ссылок ({len(errors)})</b>"]
+
+    for err in errors:
+        url = html.escape(err["url"])
+        code = err["code"]
+        lines.append(f"{url} {code}")
+
+    message = "\n".join(lines)
+
+    if len(message) > TELEGRAM_MAX_MESSAGE_LENGTH:
+        message = message[: TELEGRAM_MAX_MESSAGE_LENGTH - 30]
+        message += "\n<i>...обрезано</i>"
+
+    return message
+
+
+def send_links_check_notification(
+    errors: List[Dict[str, Any]],
+    config: Dict[str, Any],
+    logger: logging.Logger,
+) -> bool:
+    """Send Telegram notification about link check errors."""
+    telegram_config = config["telegram"]
+
+    if not telegram_config.get("enabled"):
+        logger.debug("Telegram notifications disabled")
+        return False
+
+    bot_token = telegram_config.get("bot_token", "")
+    chat_id = telegram_config.get("chat_id", "")
+
+    if not bot_token or not chat_id:
+        logger.warning("Telegram bot_token or chat_id not configured")
+        return False
+
+    if not errors:
+        return False
+
+    message = format_links_check_message(errors)
+    url = TELEGRAM_API_URL.format(bot_token)
+
+    payload = {
+        "chat_id": chat_id,
+        "text": message,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }
+
+    try:
+        response = requests.post(url, json=payload, timeout=30)
+        response.raise_for_status()
+        result = response.json()
+
+        if result.get("ok"):
+            logger.info(
+                "Telegram link-check notification sent: %d errors", len(errors)
+            )
+            return True
+
+        logger.error("Telegram API error: %s", result.get("description"))
+        return False
+    except requests.RequestException as e:
+        logger.error("Failed to send link-check notification: %s", e)
+        return False
+
+
+# =============================================================================
 # OUTPUT
 # =============================================================================
 
@@ -2238,6 +2607,16 @@ def parse_cli_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="Skip parsing /mySites and updating ddl.domain metrics",
     )
+    parser.add_argument(
+        "--sync-links",
+        action="store_true",
+        help="Sync paid/wait_indexation links from CSV export to ggl_links table",
+    )
+    parser.add_argument(
+        "--check-links",
+        action="store_true",
+        help="Check HTTP availability of all links in ggl_links table",
+    )
     return parser.parse_args(argv)
 
 
@@ -2255,11 +2634,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     try:
         args = parse_cli_args(argv)
 
-        if args.skip_tasks and args.skip_sites:
+        needs_tasks = not args.skip_tasks
+        needs_sites = not args.skip_sites
+        needs_sync_links = args.sync_links
+        needs_check_links = args.check_links
+        needs_selenium = needs_tasks or needs_sites or needs_sync_links
+
+        if not needs_tasks and not needs_sites and not needs_sync_links and not needs_check_links:
             logger = setup_logger()
-            logger.warning(
-                "Both --skip-tasks and --skip-sites are set; nothing to do"
-            )
+            logger.warning("Nothing to do (all stages skipped)")
             return EXIT_SUCCESS
 
         # 1. Setup logger (minimal config before loading config.ini)
@@ -2285,7 +2668,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         )
 
         # Acquire mySites lock only for runs that include /mySites stage.
-        if not args.skip_sites:
+        if needs_sites:
             sites_lock_acquired, lock_reason = acquire_sites_lock(logger)
             if not sites_lock_acquired:
                 logger.warning(
@@ -2300,6 +2683,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         except mysql.connector.Error as e:
             logger.error(f"Database error: {e}")
             return EXIT_DATABASE_ERROR
+
+        # --check-links: no Selenium needed, just DB + HTTP
+        if needs_check_links:
+            logger.info("Checking link availability (--check-links)")
+            check_links(conn, config, logger)
+
+        if not needs_selenium:
+            logger.info("Parsing completed successfully")
+            return EXIT_SUCCESS
 
         # 4-5. Initialize browser and authenticate.
         # First attempt is direct; on anti-bot block retry via local proxy.
@@ -2385,7 +2777,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             logger.error("Authentication failed")
             return EXIT_AUTH_FAILED
 
-        if args.skip_tasks:
+        # Sync paid links (--sync-links)
+        if needs_sync_links:
+            logger.info("Syncing paid links (--sync-links)")
+            sync_links(driver, conn, logger)
+
+        if not needs_tasks:
             logger.info("Skipping task parsing (--skip-tasks)")
         else:
             # 6. Parse task list
@@ -2418,7 +2815,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 print_tasks(tasks, config["output"]["print_to_console"])
 
         # 10. Parse and save mySites metrics
-        if args.skip_sites:
+        if not needs_sites:
             logger.info("Skipping mySites parsing (--skip-sites)")
         else:
             sites = parse_my_sites(driver, logger)

@@ -1,0 +1,26 @@
+{
+  "verbose": false,
+  "permissions": {
+    "allow": [
+	"Bash(ssh ddl*)",
+	"Bash(make*)",
+	"Bash(cd*)",
+  	"Bash(git*)",
+	"Bash(python*)",
+	"Bash(pip*)",
+	"Bash(pytest*)",
+	"Write(/Users/alexanderbukreev/git/gogetlinks-api/**)",
+	"Edit(/Users/alexanderbukreev/git/gogetlinks-api/**)",
+	"Read(/Users/alexanderbukreev/git/gogetlinks-api/**)"
+    ],
+    "deny": [
+      "Bash(git push --force*)",
+      "Bash(git reset --hard*)",
+      "Bash(rm -rf*)",
+      "Bash(sudo*)",
+      "Bash(scp * ddl:*)",
+      "Bash(rsync * ddl:*)"
+    ]
+  }
+}
+
