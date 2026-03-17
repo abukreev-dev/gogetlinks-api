@@ -1922,7 +1922,9 @@ def save_sites_to_db(
 
 
 def get_selenium_cookies_session(
-    driver: webdriver.Chrome, logger: logging.Logger
+    driver: webdriver.Chrome,
+    logger: logging.Logger,
+    proxy_server: Optional[str] = None,
 ) -> requests.Session:
     """Create requests.Session with cookies transferred from Selenium."""
     session = requests.Session()
@@ -1932,6 +1934,12 @@ def get_selenium_cookies_session(
         )
     ua = driver.execute_script("return navigator.userAgent")
     session.headers["User-Agent"] = ua
+    if proxy_server:
+        session.proxies = {
+            "http": f"http://{proxy_server}",
+            "https": f"http://{proxy_server}",
+        }
+        logger.debug("Using proxy %s for requests session", proxy_server)
     logger.debug("Transferred %d cookies to requests session", len(driver.get_cookies()))
     return session
 
@@ -2098,9 +2106,10 @@ def sync_links(
     driver: webdriver.Chrome,
     conn: MySQLConnection,
     logger: logging.Logger,
+    proxy_server: Optional[str] = None,
 ) -> bool:
     """Download paid + wait_indexation CSVs and sync to ggl_links table."""
-    session = get_selenium_cookies_session(driver, logger)
+    session = get_selenium_cookies_session(driver, logger, proxy_server)
 
     all_links: List[Dict[str, Any]] = []
 
@@ -2780,7 +2789,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         # Sync paid links (--sync-links)
         if needs_sync_links:
             logger.info("Syncing paid links (--sync-links)")
-            sync_links(driver, conn, logger)
+            sync_links(driver, conn, logger, proxy_server=proxy)
 
         if not needs_tasks:
             logger.info("Skipping task parsing (--skip-tasks)")
