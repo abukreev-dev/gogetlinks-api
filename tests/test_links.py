@@ -14,6 +14,7 @@ from gogetlinks_parser import (
     check_links,
     send_links_check_notification,
     get_selenium_cookies_session,
+    warm_links,
     DB_FULL_LINKS_TABLE,
     TELEGRAM_MAX_MESSAGE_LENGTH,
 )
@@ -428,3 +429,108 @@ class TestCliArgs:
         assert args.check_links is True
         assert args.skip_tasks is True
         assert args.skip_sites is True
+
+    def test_warm_links_flag(self):
+        from gogetlinks_parser import parse_cli_args
+
+        args = parse_cli_args(["--warm-links"])
+        assert args.warm_links is True
+        assert args.sync_links is False
+
+    def test_all_link_flags(self):
+        from gogetlinks_parser import parse_cli_args
+
+        args = parse_cli_args(["--sync-links", "--warm-links", "--check-links", "--skip-tasks", "--skip-sites"])
+        assert args.sync_links is True
+        assert args.warm_links is True
+        assert args.check_links is True
+
+
+# =============================================================================
+# warm_links
+# =============================================================================
+
+
+class TestWarmLinks:
+    def test_warm_all_ok(self, mock_conn, logger):
+        cursor_select = Mock()
+        cursor_update = Mock()
+        mock_conn.cursor.side_effect = [cursor_select, cursor_update]
+        cursor_select.fetchall.return_value = [
+            {"id": 1, "url": "https://example.com"},
+        ]
+
+        with patch("gogetlinks_parser.requests.get") as mock_get:
+            mock_get.return_value = Mock(status_code=200)
+            result = warm_links(mock_conn, logger)
+
+        assert result is True
+        mock_conn.commit.assert_called_once()
+        # Check User-Agent and cookie were passed
+        call_kwargs = mock_get.call_args
+        assert call_kwargs[1]["headers"]["User-Agent"] == "DDL dashboard cron checker"
+        assert call_kwargs[1]["cookies"] == {"abukreev": "wpadmin"}
+
+    def test_warm_with_errors(self, mock_conn, logger):
+        cursor_select = Mock()
+        cursor_update = Mock()
+        mock_conn.cursor.side_effect = [cursor_select, cursor_update]
+        cursor_select.fetchall.return_value = [
+            {"id": 1, "url": "https://ok.com"},
+            {"id": 2, "url": "https://broken.com"},
+        ]
+
+        with patch("gogetlinks_parser.requests.get") as mock_get:
+            mock_get.side_effect = [
+                Mock(status_code=200),
+                Mock(status_code=503),
+            ]
+            result = warm_links(mock_conn, logger)
+
+        assert result is True
+        assert cursor_update.execute.call_count == 2
+
+    def test_warm_empty_table(self, mock_conn, logger):
+        cursor = Mock()
+        mock_conn.cursor.return_value = cursor
+        cursor.fetchall.return_value = []
+
+        result = warm_links(mock_conn, logger)
+
+        assert result is True
+
+    def test_warm_timeout_records_zero(self, mock_conn, logger):
+        import requests as req
+
+        cursor_select = Mock()
+        cursor_update = Mock()
+        mock_conn.cursor.side_effect = [cursor_select, cursor_update]
+        cursor_select.fetchall.return_value = [
+            {"id": 1, "url": "https://timeout.com"},
+        ]
+
+        with patch("gogetlinks_parser.requests.get") as mock_get:
+            mock_get.side_effect = req.RequestException("Timeout")
+            result = warm_links(mock_conn, logger)
+
+        assert result is True
+        update_call = cursor_update.execute.call_args
+        assert update_call[0][1][0] == 0  # code
+
+    def test_warm_db_error_rollback(self, mock_conn, logger):
+        import mysql.connector
+
+        cursor_select = Mock()
+        cursor_update = Mock()
+        mock_conn.cursor.side_effect = [cursor_select, cursor_update]
+        cursor_select.fetchall.return_value = [
+            {"id": 1, "url": "https://example.com"},
+        ]
+        cursor_update.execute.side_effect = mysql.connector.Error("DB error")
+
+        with patch("gogetlinks_parser.requests.get") as mock_get:
+            mock_get.return_value = Mock(status_code=200)
+            result = warm_links(mock_conn, logger)
+
+        assert result is False
+        mock_conn.rollback.assert_called_once()

@@ -2232,6 +2232,90 @@ def check_links(
     return True
 
 
+WARM_USER_AGENT = "DDL dashboard cron checker"
+WARM_COOKIE = {"abukreev": "wpadmin"}
+WARM_TIMEOUT = (10, 30)  # (connect, read)
+
+
+def warm_links(
+    conn: MySQLConnection,
+    logger: logging.Logger,
+) -> bool:
+    """Warm links by sending GET request to each URL.
+
+    Warms cache for paid links (date_paid >= 2025-01-01).
+    Updates last_check_at and last_check_code in ggl_links.
+    """
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute(
+            f"SELECT id, url FROM {DB_FULL_LINKS_TABLE}"
+            " WHERE date_paid >= '2025-01-01' OR date_paid IS NULL"
+        )
+        rows = cursor.fetchall()
+    finally:
+        cursor.close()
+
+    if not rows:
+        logger.info("No links to warm")
+        return True
+
+    logger.info("Warming %d links", len(rows))
+    ok_count = 0
+    err_count = 0
+
+    update_cursor = conn.cursor()
+    try:
+        for i, row in enumerate(rows, 1):
+            url = row["url"]
+            start = time.time()
+            try:
+                resp = requests.get(
+                    url,
+                    timeout=WARM_TIMEOUT,
+                    headers={"User-Agent": WARM_USER_AGENT},
+                    cookies=WARM_COOKIE,
+                    allow_redirects=True,
+                )
+                code = resp.status_code
+                elapsed = time.time() - start
+            except requests.RequestException as e:
+                code = 0
+                elapsed = time.time() - start
+                logger.warning("Warm failed: %s → %s (%.1fs)", url, e, elapsed)
+
+            update_cursor.execute(
+                f"""UPDATE {DB_FULL_LINKS_TABLE}
+                    SET last_check_at = NOW(), last_check_code = %s
+                    WHERE id = %s
+                """,
+                (code, row["id"]),
+            )
+
+            if code == 200:
+                ok_count += 1
+                logger.debug("Warm OK: %s → %d (%.1fs)", url, code, elapsed)
+            else:
+                err_count += 1
+                logger.warning("Warm error: %s → %d (%.1fs)", url, code, elapsed)
+
+            if i % 50 == 0:
+                logger.info("Warm progress: %d/%d", i, len(rows))
+
+        conn.commit()
+    except mysql.connector.Error as e:
+        conn.rollback()
+        logger.error("Failed to update warm results: %s", e)
+        return False
+    finally:
+        update_cursor.close()
+
+    logger.info(
+        "Warm complete: %d total, %d ok, %d errors", len(rows), ok_count, err_count
+    )
+    return True
+
+
 def format_links_check_message(errors: List[Dict[str, Any]]) -> str:
     """Format link check errors as Telegram message."""
     lines = [f"<b>Проблемы с доступом оплаченных ссылок ({len(errors)})</b>"]
@@ -2647,6 +2731,11 @@ def parse_cli_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="Check HTTP availability of all links in ggl_links table",
     )
+    parser.add_argument(
+        "--warm-links",
+        action="store_true",
+        help="Warm link cache by sending GET to each URL in ggl_links",
+    )
     return parser.parse_args(argv)
 
 
@@ -2668,9 +2757,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         needs_sites = not args.skip_sites
         needs_sync_links = args.sync_links
         needs_check_links = args.check_links
+        needs_warm_links = args.warm_links
         needs_selenium = needs_tasks or needs_sites or needs_sync_links
 
-        if not needs_tasks and not needs_sites and not needs_sync_links and not needs_check_links:
+        if not needs_tasks and not needs_sites and not needs_sync_links and not needs_check_links and not needs_warm_links:
             logger = setup_logger()
             logger.warning("Nothing to do (all stages skipped)")
             return EXIT_SUCCESS
@@ -2714,7 +2804,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             logger.error(f"Database error: {e}")
             return EXIT_DATABASE_ERROR
 
-        # --check-links: no Selenium needed, just DB + HTTP
+        # --warm-links / --check-links: no Selenium needed, just DB + HTTP
+        if needs_warm_links:
+            logger.info("Warming links (--warm-links)")
+            warm_links(conn, logger)
+
         if needs_check_links:
             logger.info("Checking link availability (--check-links)")
             check_links(conn, config, logger)

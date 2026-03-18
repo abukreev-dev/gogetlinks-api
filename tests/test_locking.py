@@ -107,7 +107,7 @@ def test_release_does_not_remove_foreign_lock(tmp_path):
 @patch("gogetlinks_parser.setup_logger")
 @patch(
     "gogetlinks_parser.parse_cli_args",
-    return_value=Namespace(skip_tasks=False, skip_sites=False, sync_links=False, check_links=False),
+    return_value=Namespace(skip_tasks=False, skip_sites=False, sync_links=False, check_links=False, warm_links=False),
 )
 def test_main_exits_success_when_sites_lock_busy(
     _mock_args,
