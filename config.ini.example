@@ -29,6 +29,8 @@ bot_token = 123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
 chat_id = -100123456789
 # Кого тегать в уведомлениях о новых задачах (через пробел, например: @user1 @user2)
 mention =
+# Прокси для Telegram Bot API, если нужен выход через squid
+proxy = 127.0.0.1:3128
 
 [output]
 # Выводить задачи в консоль (true для тестирования, false для cron)

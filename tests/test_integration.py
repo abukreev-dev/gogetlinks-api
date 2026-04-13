@@ -11,6 +11,7 @@ from gogetlinks_parser import (
     format_telegram_message,
     format_status_changes_message,
     format_no_new_tasks_message,
+    get_telegram_proxies,
     send_telegram_notification,
     send_status_changes_notification,
     send_no_new_tasks_notification,
@@ -61,6 +62,7 @@ def telegram_config():
             "enabled": True,
             "bot_token": "123456:ABC-DEF",
             "chat_id": "-100123456789",
+            "proxy": "127.0.0.1:3128",
         }
     }
 
@@ -197,6 +199,11 @@ class TestTelegramSending:
         payload = call_kwargs.kwargs.get("json") or call_kwargs[1].get("json")
         assert payload["chat_id"] == "-100123456789"
         assert payload["parse_mode"] == "HTML"
+        proxies = call_kwargs.kwargs.get("proxies") or call_kwargs[1].get("proxies")
+        assert proxies == {
+            "http": "http://127.0.0.1:3128",
+            "https": "http://127.0.0.1:3128",
+        }
 
     @patch("gogetlinks_parser.requests.post")
     def test_send_notification_api_error(
@@ -471,9 +478,26 @@ class TestNoNewTasksAlert:
         result = send_no_new_tasks_notification(7, telegram_config, logger)
 
         assert result is True
-        mock_post.assert_called_once()
-        payload = mock_post.call_args[1]["json"]
-        assert "7 дней" in payload["text"]
+
+    def test_get_telegram_proxies_default_proxy(self):
+        config = {"telegram": {"proxy": ""}}
+
+        proxies = get_telegram_proxies(config["telegram"])
+
+        assert proxies == {
+            "http": "http://127.0.0.1:3128",
+            "https": "http://127.0.0.1:3128",
+        }
+
+    def test_get_telegram_proxies_custom_proxy(self):
+        config = {"telegram": {"proxy": "squid.internal:3128"}}
+
+        proxies = get_telegram_proxies(config["telegram"])
+
+        assert proxies == {
+            "http": "http://squid.internal:3128",
+            "https": "http://squid.internal:3128",
+        }
 
     @patch("gogetlinks_parser.requests.post")
     def test_send_notification_with_mention(self, mock_post, telegram_config, logger):

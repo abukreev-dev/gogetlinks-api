@@ -175,6 +175,7 @@ def load_config(config_path: str = "config.ini") -> Dict[str, Any]:
             "bot_token": parser.get("telegram", "bot_token", fallback=""),
             "chat_id": parser.get("telegram", "chat_id", fallback=""),
             "mention": parser.get("telegram", "mention", fallback=""),
+            "proxy": parser.get("telegram", "proxy", fallback="").strip(),
         },
         "output": {
             "print_to_console": parser.getboolean("output", "print_to_console"),
@@ -2365,9 +2366,14 @@ def send_links_check_notification(
         "parse_mode": "HTML",
         "disable_web_page_preview": True,
     }
+    proxies = get_telegram_proxies(telegram_config)
 
     try:
-        response = requests.post(url, json=payload, timeout=30)
+        request_kwargs = {"json": payload, "timeout": 30}
+        if proxies:
+            request_kwargs["proxies"] = proxies
+
+        response = requests.post(url, **request_kwargs)
         response.raise_for_status()
         result = response.json()
 
@@ -2441,6 +2447,30 @@ def print_tasks(tasks: List[Dict[str, Any]], enabled: bool) -> None:
 
 TELEGRAM_API_URL = "https://api.telegram.org/bot{}/sendMessage"
 TELEGRAM_MAX_MESSAGE_LENGTH = 4096
+
+
+def get_telegram_proxies(
+    telegram_config: Dict[str, Any],
+) -> Optional[Dict[str, str]]:
+    """Build proxy settings for Telegram requests.
+
+    Args:
+        telegram_config: Telegram configuration dictionary.
+
+    Returns:
+        Requests proxies mapping or None when proxy is disabled.
+    """
+    proxy_server = telegram_config.get("proxy", "").strip()
+    if not proxy_server:
+        proxy_server = DEFAULT_FALLBACK_PROXY
+
+    if not proxy_server:
+        return None
+
+    return {
+        "http": f"http://{proxy_server}",
+        "https": f"http://{proxy_server}",
+    }
 
 
 def format_telegram_message(
@@ -2551,9 +2581,14 @@ def send_telegram_notification(
         "parse_mode": "HTML",
         "disable_web_page_preview": True,
     }
+    proxies = get_telegram_proxies(telegram_config)
 
     try:
-        response = requests.post(url, json=payload, timeout=30)
+        request_kwargs = {"json": payload, "timeout": 30}
+        if proxies:
+            request_kwargs["proxies"] = proxies
+
+        response = requests.post(url, **request_kwargs)
         response.raise_for_status()
 
         result = response.json()
@@ -2601,9 +2636,14 @@ def send_status_changes_notification(
         "parse_mode": "HTML",
         "disable_web_page_preview": True,
     }
+    proxies = get_telegram_proxies(telegram_config)
 
     try:
-        response = requests.post(url, json=payload, timeout=30)
+        request_kwargs = {"json": payload, "timeout": 30}
+        if proxies:
+            request_kwargs["proxies"] = proxies
+
+        response = requests.post(url, **request_kwargs)
         response.raise_for_status()
         result = response.json()
 
@@ -2684,9 +2724,14 @@ def send_no_new_tasks_notification(
         "parse_mode": "HTML",
         "disable_web_page_preview": True,
     }
+    proxies = get_telegram_proxies(telegram_config)
 
     try:
-        response = requests.post(url, json=payload, timeout=30)
+        request_kwargs = {"json": payload, "timeout": 30}
+        if proxies:
+            request_kwargs["proxies"] = proxies
+
+        response = requests.post(url, **request_kwargs)
         response.raise_for_status()
         result = response.json()
 

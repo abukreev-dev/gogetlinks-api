@@ -97,6 +97,8 @@ bot_token = 123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
 chat_id = -100123456789
 # Упоминания применяются только к уведомлениям о новых задачах (/webTask)
 mention = @user1 @user2
+# Прокси для Telegram Bot API. По умолчанию используется squid на 127.0.0.1:3128
+proxy = 127.0.0.1:3128
 
 [output]
 print_to_console = true
