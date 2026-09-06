@@ -101,9 +101,10 @@ class TestSaveSitesToDb:
         logger = logging.getLogger("test")
         conn, cursor = self._make_conn()
         cursor.rowcount = 1
+        # host, ggl_status, sqi, cf_tf, pr_cy, trust, traffic, indexation, referencing
         cursor.fetchall.return_value = [
-            ("example.com", "Отклонен"),
-            ("site.org", "Отклонен"),
+            ("example.com", "Отклонен", 500, 2011, 20, 30, 1000, None, "Низкая"),
+            ("site.org", "Отклонен", 100, 105, 10, 5, 50, None, "Низкая"),
         ]
 
         sites = [
@@ -115,6 +116,9 @@ class TestSaveSitesToDb:
                 "sqi": 500,
                 "cf_tf": 2011,
                 "trust": 30,
+                "pr_cy": 20,
+                "indexation": None,
+                "referencing": "Низкая",
             },
             {
                 "site": "site.org",
@@ -124,12 +128,16 @@ class TestSaveSitesToDb:
                 "sqi": 100,
                 "cf_tf": 105,
                 "trust": 5,
+                "pr_cy": 10,
+                "indexation": None,
+                "referencing": "Низкая",
             },
         ]
 
-        updated, status_changes = save_sites_to_db(conn, sites, logger)
+        updated, status_changes, metric_changes = save_sites_to_db(conn, sites, logger)
 
         assert updated == 2
+        assert metric_changes == []
         assert len(status_changes) == 1
         assert status_changes[0]["site"] == "example.com"
         assert status_changes[0]["old_status"] == "Отклонен"
@@ -150,10 +158,11 @@ class TestSaveSitesToDb:
         logger = logging.getLogger("test")
         conn, cursor = self._make_conn()
 
-        updated, status_changes = save_sites_to_db(conn, [], logger)
+        updated, status_changes, metric_changes = save_sites_to_db(conn, [], logger)
 
         assert updated == 0
         assert status_changes == []
+        assert metric_changes == []
         cursor.execute.assert_not_called()
         conn.commit.assert_not_called()
 
@@ -171,13 +180,17 @@ class TestSaveSitesToDb:
                 "sqi": 500,
                 "cf_tf": 2011,
                 "trust": 30,
+                "pr_cy": 20,
+                "indexation": None,
+                "referencing": "Низкая",
             }
         ]
 
-        updated, status_changes = save_sites_to_db(conn, sites, logger)
+        updated, status_changes, metric_changes = save_sites_to_db(conn, sites, logger)
 
         assert updated == 0
         assert status_changes == []
+        assert metric_changes == []
         conn.rollback.assert_called_once()
         cursor.close.assert_called_once()
 

@@ -122,6 +122,44 @@ DETAIL_REQUEST_DELAY = 1.5
 # Stale tasks alert
 NO_NEW_TASKS_THRESHOLD_DAYS = 5
 
+# Metric change alerts (/mySites): minimal delta worth a Telegram message.
+# Values can be overridden via [metrics] section in config.ini.
+METRIC_DEFAULT_THRESHOLDS = {
+    "sqi": 10,
+    "cf_tf": 1,
+    "pr_cy": 1,
+    "trust": 1,
+    "indexation": 5,
+}
+
+# Traffic is noisy, so it is compared in percent, not in absolute units.
+METRIC_TRAFFIC_DEFAULT_PERCENT = 30
+
+# Human-readable labels for metric change messages.
+METRIC_LABELS = {
+    "sqi": "ИКС",
+    "cf_tf": "TF/CF",
+    "pr_cy": "PR-CY",
+    "trust": "Траст",
+    "indexation": "Индексация",
+    "traffic": "Трафик",
+    "referencing": "Ссылочность",
+}
+
+# Order of metrics inside one site block.
+METRIC_ORDER = [
+    "cf_tf",
+    "sqi",
+    "pr_cy",
+    "trust",
+    "indexation",
+    "referencing",
+    "traffic",
+]
+
+# Known values of the "Ссылочность" column.
+REFERENCING_LABELS = ("Низкая", "Оптимальная", "Повышенная", "Высокая")
+
 # Session persistence
 COOKIE_FILE = "session_cookies.pkl"
 
@@ -176,6 +214,18 @@ def load_config(config_path: str = "config.ini") -> Dict[str, Any]:
             "chat_id": parser.get("telegram", "chat_id", fallback=""),
             "mention": parser.get("telegram", "mention", fallback=""),
             "proxy": parser.get("telegram", "proxy", fallback="").strip(),
+        },
+        "metrics": {
+            # Off unless explicitly enabled: the first run after the DB
+            # migration fills the new columns and would report them as changes.
+            "enabled": parser.getboolean("metrics", "enabled", fallback=False),
+            "thresholds": {
+                key: parser.getint("metrics", key, fallback=default)
+                for key, default in METRIC_DEFAULT_THRESHOLDS.items()
+            },
+            "traffic_percent": parser.getint(
+                "metrics", "traffic_percent", fallback=METRIC_TRAFFIC_DEFAULT_PERCENT
+            ),
         },
         "output": {
             "print_to_console": parser.getboolean("output", "print_to_console"),
@@ -1615,7 +1665,11 @@ def parse_site_row(
     status = sanitize_text(cells[1].text)
     sqi = extract_digits_only(sanitize_text(cells[2].text))
     cf_tf = extract_digits_only(sanitize_text(cells[3].text))
+    pr_cy = extract_digits_only(sanitize_text(cells[4].text))
     traffic = extract_digits_only(sanitize_text(cells[5].text))
+    # "Индексация" holds a percent or "N/A" when GGL has no data yet.
+    indexation = extract_digits_only(sanitize_text(cells[6].text))
+    referencing = extract_referencing_label(sanitize_text(cells[7].text))
     trust = extract_digits_only(sanitize_text(cells[9].text))
 
     # Reject reason parsing is intentionally disabled: keep status only.
@@ -1626,10 +1680,25 @@ def parse_site_row(
         "status": status,
         "sqi": sqi,
         "cf_tf": cf_tf,
+        "pr_cy": pr_cy,
         "traffic": traffic,
+        "indexation": indexation,
+        "referencing": referencing,
         "trust": trust,
         "description": description,
     }
+
+
+def extract_referencing_label(text: str) -> Optional[str]:
+    """Return one of REFERENCING_LABELS found in the "Ссылочность" cell."""
+    if not text:
+        return None
+
+    for label in REFERENCING_LABELS:
+        if label.lower() in text.lower():
+            return label
+
+    return None
 
 
 def get_my_sites_rows(driver: webdriver.Chrome) -> List[WebElement]:
@@ -1829,15 +1898,116 @@ def parse_my_sites(
         return []
 
 
+# Columns fetched before UPDATE to detect what actually changed.
+SITE_METRIC_COLUMNS = [
+    ("sqi", "ggl_sqi"),
+    ("cf_tf", "ggl_cf_tf"),
+    ("pr_cy", "ggl_pr_cy"),
+    ("trust", "ggl_trust"),
+    ("traffic", "ggl_traffic"),
+    ("indexation", "ggl_indexation"),
+    ("referencing", "ggl_referencing"),
+]
+
+
+def format_metric_value(value: Any) -> str:
+    """Render a metric value for a Telegram message."""
+    if value is None or value == "":
+        return "—"
+    return str(value)
+
+
+def is_metric_change_significant(
+    metric: str,
+    old_value: Any,
+    new_value: Any,
+    thresholds: Dict[str, int],
+    traffic_percent: int,
+) -> bool:
+    """Decide whether the delta of one metric is worth notifying about.
+
+    A missing new value is treated as a parsing artifact, not as a change:
+    GoGetLinks renders "N/A" and empty cells while data is being recalculated,
+    and reporting those would flood the chat on every partial page load.
+    """
+    if new_value is None or new_value == "":
+        return False
+
+    if metric == "referencing":
+        return format_metric_value(old_value) != format_metric_value(new_value)
+
+    try:
+        new_number = int(new_value)
+    except (TypeError, ValueError):
+        return False
+
+    if old_value is None or old_value == "":
+        # Metric appeared for the first time.
+        return True
+
+    try:
+        old_number = int(old_value)
+    except (TypeError, ValueError):
+        return True
+
+    delta = abs(new_number - old_number)
+    if delta == 0:
+        return False
+
+    if metric == "traffic":
+        if old_number == 0:
+            return new_number > 0
+        return (delta * 100 / old_number) >= traffic_percent
+
+    return delta >= thresholds.get(metric, 1)
+
+
+def detect_metric_changes(
+    host: str,
+    old_values: Dict[str, Any],
+    site: Dict[str, Any],
+    thresholds: Dict[str, int],
+    traffic_percent: int,
+) -> Optional[Dict[str, Any]]:
+    """Build a per-site list of significant metric changes."""
+    changes = []
+    for metric in METRIC_ORDER:
+        old_value = old_values.get(metric)
+        new_value = site.get(metric)
+        if is_metric_change_significant(
+            metric, old_value, new_value, thresholds, traffic_percent
+        ):
+            changes.append(
+                {
+                    "metric": metric,
+                    "label": METRIC_LABELS.get(metric, metric),
+                    "old": format_metric_value(old_value),
+                    "new": format_metric_value(new_value),
+                }
+            )
+
+    if len(changes) == 0:
+        return None
+
+    return {"site": host, "changes": changes}
+
+
 def save_sites_to_db(
     conn: MySQLConnection,
     sites: List[Dict[str, Any]],
     logger: logging.Logger,
-) -> tuple[int, List[Dict[str, str]]]:
+    metrics_config: Optional[Dict[str, Any]] = None,
+) -> tuple[int, List[Dict[str, str]], List[Dict[str, Any]]]:
     """Update ddl.domain rows by host with metrics parsed from /mySites."""
     if len(sites) == 0:
         logger.info("No mySites data to save")
-        return 0, []
+        return 0, [], []
+
+    metrics_config = metrics_config or {}
+    thresholds = metrics_config.get("thresholds") or METRIC_DEFAULT_THRESHOLDS
+    traffic_percent = metrics_config.get(
+        "traffic_percent", METRIC_TRAFFIC_DEFAULT_PERCENT
+    )
 
     query = """
         UPDATE domain SET
@@ -1847,26 +2017,40 @@ def save_sites_to_db(
             ggl_sqi = %s,
             ggl_cf_tf = %s,
             ggl_trust = %s,
+            ggl_pr_cy = %s,
+            ggl_indexation = %s,
+            ggl_referencing = %s,
             ggl_update_at = NOW()
         WHERE host = %s
     """
 
     updated_count = 0
     status_changes: List[Dict[str, str]] = []
+    metric_changes: List[Dict[str, Any]] = []
     cursor = conn.cursor()
 
     try:
         hosts = [site.get("site") for site in sites if site.get("site")]
         existing_status_map: Dict[str, Optional[str]] = {}
+        existing_metrics_map: Dict[str, Dict[str, Any]] = {}
         if len(hosts) > 0:
             placeholders = ", ".join(["%s"] * len(hosts))
+            columns = ", ".join(column for _, column in SITE_METRIC_COLUMNS)
             cursor.execute(
-                f"SELECT host, ggl_status FROM domain WHERE host IN ({placeholders})",
+                f"SELECT host, ggl_status, {columns} "
+                f"FROM domain WHERE host IN ({placeholders})",
                 tuple(hosts),
             )
-            for host, ggl_status in cursor.fetchall():
-                if host:
-                    existing_status_map[str(host).lower()] = ggl_status
+            for row in cursor.fetchall():
+                host = row[0]
+                if not host:
+                    continue
+                host_key = str(host).lower()
+                existing_status_map[host_key] = row[1]
+                existing_metrics_map[host_key] = {
+                    metric: row[index + 2]
+                    for index, (metric, _) in enumerate(SITE_METRIC_COLUMNS)
+                }
 
         for site in sites:
             host = site.get("site")
@@ -1884,6 +2068,18 @@ def save_sites_to_db(
                     }
                 )
 
+            # Metrics of a host unknown to DDL have nothing to compare against.
+            if host and host in existing_metrics_map:
+                site_changes = detect_metric_changes(
+                    host,
+                    existing_metrics_map[host],
+                    site,
+                    thresholds,
+                    traffic_percent,
+                )
+                if site_changes:
+                    metric_changes.append(site_changes)
+
             cursor.execute(
                 query,
                 (
@@ -1893,6 +2089,9 @@ def save_sites_to_db(
                     site.get("sqi"),
                     site.get("cf_tf"),
                     site.get("trust"),
+                    site.get("pr_cy"),
+                    site.get("indexation"),
+                    site.get("referencing"),
                     host,
                 ),
             )
@@ -1904,14 +2103,15 @@ def save_sites_to_db(
         logger.info(
             "mySites DB update completed: "
             f"parsed={len(sites)}, updated={updated_count}, "
-            f"status_changed={len(status_changes)}"
+            f"status_changed={len(status_changes)}, "
+            f"metrics_changed={len(metric_changes)}"
         )
-        return updated_count, status_changes
+        return updated_count, status_changes, metric_changes
 
     except mysql.connector.Error as e:
         conn.rollback()
         logger.error(f"Failed to update domain metrics: {e}")
-        return 0, []
+        return 0, [], []
 
     finally:
         cursor.close()
@@ -2539,6 +2739,37 @@ def format_status_changes_message(changes: List[Dict[str, str]]) -> str:
     return message
 
 
+def format_metric_changes_message(changes: List[Dict[str, Any]]) -> str:
+    """Format per-site metric changes as Telegram HTML message."""
+    total_metrics = sum(len(item.get("changes", [])) for item in changes)
+    lines = [
+        f"<b>Изменения метрик GoGetLinks "
+        f"({len(changes)} сайт(ов), {total_metrics} показател(ей))</b>"
+    ]
+
+    for item in changes:
+        site = html.escape(str(item.get("site", "—")))
+        lines.append("")
+        lines.append(f"<b>{site}</b>")
+        for change in item.get("changes", []):
+            label = html.escape(str(change.get("label", "—")))
+            old_value = html.escape(str(change.get("old", "—")))
+            new_value = html.escape(str(change.get("new", "—")))
+            lines.append(f"• {label}: {old_value} → <b>{new_value}</b>")
+
+    lines.append("")
+    lines.append('<a href="https://gogetlinks.net/mySites">Открыть Мои сайты</a>')
+
+    message = "\n".join(lines)
+
+    if len(message) > TELEGRAM_MAX_MESSAGE_LENGTH:
+        footer = '\n\n<a href="https://gogetlinks.net/mySites">Открыть Мои сайты</a>'
+        message = message[: TELEGRAM_MAX_MESSAGE_LENGTH - len(footer) - 20]
+        message += "\n<i>...обрезано</i>" + footer
+
+    return message
+
+
 def send_telegram_notification(
     tasks: List[Dict[str, Any]],
     config: Dict[str, Any],
@@ -2658,6 +2889,67 @@ def send_status_changes_notification(
         return False
     except requests.RequestException as e:
         logger.error(f"Failed to send status-change notification: {e}")
+        return False
+
+
+def send_metric_changes_notification(
+    changes: List[Dict[str, Any]],
+    config: Dict[str, Any],
+    logger: logging.Logger,
+) -> bool:
+    """Send Telegram notification about changed /mySites metrics."""
+    telegram_config = config["telegram"]
+
+    if not telegram_config.get("enabled"):
+        logger.debug("Telegram notifications disabled")
+        return False
+
+    if not config.get("metrics", {}).get("enabled", True):
+        logger.debug("Metric change notifications disabled")
+        return False
+
+    bot_token = telegram_config.get("bot_token", "")
+    chat_id = telegram_config.get("chat_id", "")
+
+    if not bot_token or not chat_id:
+        logger.warning("Telegram bot_token or chat_id not configured")
+        return False
+
+    if len(changes) == 0:
+        logger.debug("No metric changes to notify about")
+        return False
+
+    message = format_metric_changes_message(changes)
+    url = TELEGRAM_API_URL.format(bot_token)
+
+    payload = {
+        "chat_id": chat_id,
+        "text": message,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }
+    proxies = get_telegram_proxies(telegram_config)
+
+    try:
+        request_kwargs = {"json": payload, "timeout": 30}
+        if proxies:
+            request_kwargs["proxies"] = proxies
+
+        response = requests.post(url, **request_kwargs)
+        response.raise_for_status()
+        result = response.json()
+
+        if result.get("ok"):
+            logger.info(
+                "Telegram metric-change notification sent: "
+                f"{len(changes)} site(s)"
+            )
+            return True
+
+        logger.error(f"Telegram API error: {result.get('description')}")
+        return False
+    except requests.RequestException as e:
+        logger.error(f"Failed to send metric-change notification: {e}")
         return False
 
 
@@ -2973,13 +3265,18 @@ def main(argv: Optional[List[str]] = None) -> int:
             logger.info("Skipping mySites parsing (--skip-sites)")
         else:
             sites = parse_my_sites(driver, logger)
-            updated_sites, status_changes = save_sites_to_db(conn, sites, logger)
+            updated_sites, status_changes, metric_changes = save_sites_to_db(
+                conn, sites, logger, config.get("metrics")
+            )
             if len(status_changes) > 0:
                 send_status_changes_notification(status_changes, config, logger)
+            if len(metric_changes) > 0:
+                send_metric_changes_notification(metric_changes, config, logger)
             logger.info(
                 "mySites summary: "
                 f"parsed={len(sites)}, updated={updated_sites}, "
-                f"status_changed={len(status_changes)}"
+                f"status_changed={len(status_changes)}, "
+                f"metrics_changed={len(metric_changes)}"
             )
 
             # 11. Check if no new tasks for too long
