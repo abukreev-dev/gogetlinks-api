@@ -12,6 +12,7 @@ from gogetlinks_parser import (
     detect_metric_changes,
     extract_referencing_label,
     format_metric_changes_message,
+    get_metric_direction,
     is_metric_change_significant,
     save_sites_to_db,
     send_metric_changes_notification,
@@ -88,6 +89,31 @@ class TestDetectMetricChanges:
         assert result["changes"][0]["new"] == "40"
 
 
+class TestMetricDirection:
+    def test_numeric_increase_is_up(self):
+        assert get_metric_direction("sqi", 20, 40) == "up"
+
+    def test_numeric_decrease_is_down(self):
+        assert get_metric_direction("trust", 5, 3) == "down"
+
+    def test_referencing_never_marked(self):
+        assert get_metric_direction("referencing", "Низкая", "Оптимальная") is None
+
+    def test_first_appearance_not_marked(self):
+        assert get_metric_direction("pr_cy", None, 12) is None
+
+    def test_detect_metric_changes_includes_direction(self):
+        old = {"sqi": 20, "trust": 5}
+        site = {"sqi": 40, "trust": 3}
+
+        result = detect_metric_changes(
+            "example.com", old, site, THRESHOLDS, TRAFFIC_PERCENT
+        )
+
+        directions = {c["metric"]: c["direction"] for c in result["changes"]}
+        assert directions == {"sqi": "up", "trust": "down"}
+
+
 class TestReferencingLabel:
     def test_known_labels(self):
         assert extract_referencing_label("Низкая") == "Низкая"
@@ -104,8 +130,20 @@ class TestFormatMetricChangesMessage:
             {
                 "site": "example.com",
                 "changes": [
-                    {"metric": "sqi", "label": "ИКС", "old": "20", "new": "40"},
-                    {"metric": "trust", "label": "Траст", "old": "5", "new": "3"},
+                    {
+                        "metric": "sqi",
+                        "label": "ИКС",
+                        "old": "20",
+                        "new": "40",
+                        "direction": "up",
+                    },
+                    {
+                        "metric": "trust",
+                        "label": "Траст",
+                        "old": "5",
+                        "new": "3",
+                        "direction": "down",
+                    },
                 ],
             }
         ]
@@ -113,9 +151,29 @@ class TestFormatMetricChangesMessage:
         message = format_metric_changes_message(changes)
 
         assert "example.com" in message
-        assert "ИКС: 20 → <b>40</b>" in message
-        assert "Траст: 5 → <b>3</b>" in message
+        assert "🟢 ИКС: 20 → <b>40</b>" in message
+        assert "🔴 Траст: 5 → <b>3</b>" in message
         assert "1 сайт(ов), 2 показател(ей)" in message
+
+    def test_message_no_mark_without_direction(self):
+        changes = [
+            {
+                "site": "example.com",
+                "changes": [
+                    {
+                        "metric": "referencing",
+                        "label": "Ссылочность",
+                        "old": "Низкая",
+                        "new": "Оптимальная",
+                        "direction": None,
+                    }
+                ],
+            }
+        ]
+
+        message = format_metric_changes_message(changes)
+
+        assert "• Ссылочность: Низкая → <b>Оптимальная</b>" in message
 
     def test_long_message_truncated(self):
         changes = [

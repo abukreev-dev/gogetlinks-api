@@ -1962,6 +1962,31 @@ def is_metric_change_significant(
     return delta >= thresholds.get(metric, 1)
 
 
+def get_metric_direction(
+    metric: str, old_value: Any, new_value: Any
+) -> Optional[str]:
+    """Return "up"/"down" for a numeric metric improvement/decline, else None.
+
+    "Referencing" is an ordinal label (Низкая/Оптимальная/...), not a scale
+    where higher is better, so it is never marked. A missing old value means
+    the metric just appeared and has no baseline to compare against.
+    """
+    if metric == "referencing":
+        return None
+    if old_value is None or old_value == "":
+        return None
+    try:
+        old_number = int(old_value)
+        new_number = int(new_value)
+    except (TypeError, ValueError):
+        return None
+    if new_number > old_number:
+        return "up"
+    if new_number < old_number:
+        return "down"
+    return None
+
+
 def detect_metric_changes(
     host: str,
     old_values: Dict[str, Any],
@@ -1983,6 +2008,7 @@ def detect_metric_changes(
                     "label": METRIC_LABELS.get(metric, metric),
                     "old": format_metric_value(old_value),
                     "new": format_metric_value(new_value),
+                    "direction": get_metric_direction(metric, old_value, new_value),
                 }
             )
 
@@ -2755,7 +2781,10 @@ def format_metric_changes_message(changes: List[Dict[str, Any]]) -> str:
             label = html.escape(str(change.get("label", "—")))
             old_value = html.escape(str(change.get("old", "—")))
             new_value = html.escape(str(change.get("new", "—")))
-            lines.append(f"• {label}: {old_value} → <b>{new_value}</b>")
+            direction = change.get("direction")
+            mark = {"up": "🟢", "down": "🔴"}.get(direction, "")
+            prefix = f"{mark} " if mark else ""
+            lines.append(f"• {prefix}{label}: {old_value} → <b>{new_value}</b>")
 
     lines.append("")
     lines.append('<a href="https://gogetlinks.net/mySites">Открыть Мои сайты</a>')
