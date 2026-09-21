@@ -1,6 +1,7 @@
 """
 Тесты уведомлений об изменении метрик /mySites
 """
+
 import logging
 
 import pytest
@@ -18,7 +19,6 @@ from gogetlinks_parser import (
     send_metric_changes_notification,
 )
 
-
 THRESHOLDS = METRIC_DEFAULT_THRESHOLDS
 TRAFFIC_PERCENT = METRIC_TRAFFIC_DEFAULT_PERCENT
 
@@ -34,8 +34,31 @@ class TestMetricSignificance:
     def test_sqi_at_threshold_reported(self):
         assert significant("sqi", 20, 30) is True
 
-    def test_cf_tf_single_point_reported(self):
-        assert significant("cf_tf", 19, 20) is True
+    @pytest.mark.parametrize(
+        "old,new,expected",
+        [
+            (19, 20, False),
+            (20, 19, False),
+            (28, 29, False),
+            (29, 30, True),
+            (28, 30, True),
+            (29, 31, True),
+            (30, 31, False),
+            (31, 30, False),
+            (30, 30, False),
+            (19, 21, True),
+            (21, 19, True),
+            (30, 28, True),
+        ],
+    )
+    def test_cf_tf_threshold_and_goal(self, old, new, expected):
+        assert significant("cf_tf", old, new) is expected
+
+    def test_cf_tf_old_config_cannot_enable_single_point_noise(self):
+        assert not is_metric_change_significant("cf_tf", 19, 20, {"cf_tf": 1}, 30)
+
+    def test_cf_tf_goal_overrides_custom_threshold(self):
+        assert is_metric_change_significant("cf_tf", 29, 30, {"cf_tf": 5}, 30)
 
     def test_equal_values_ignored(self):
         assert significant("trust", 5, 5) is False
@@ -125,6 +148,21 @@ class TestReferencingLabel:
 
 
 class TestFormatMetricChangesMessage:
+    @pytest.mark.parametrize(
+        "host,marked",
+        [
+            ("alcargo.ru", True),
+            ("ALCARGO.RU", True),
+            ("example.com", False),
+            ("fake-alcargo.ru", False),
+        ],
+    )
+    def test_priority_domain_crown(self, host, marked):
+        message = format_metric_changes_message([{"site": host, "changes": []}])
+
+        assert (f"<b>{host}</b> 👑" in message) is marked
+        assert ("👑" in message) is marked
+
     def test_message_contains_sites_and_metrics(self):
         changes = [
             {
@@ -237,6 +275,28 @@ class TestSendMetricChangesNotification:
 
 
 class TestSaveSitesMetricChanges:
+    def test_gradual_growth_saved_but_only_goal_notified(self):
+        logger = logging.getLogger("test")
+        reported = []
+        for old, new in [(27, 28), (28, 29), (29, 30)]:
+            conn, cursor = self._make_conn(
+                [("alcargo.ru", "Доступен", None, old, None, None, None, None, None)]
+            )
+            site = {"site": "alcargo.ru", "status": "Доступен", "cf_tf": new}
+
+            updated, _, changes = save_sites_to_db(
+                conn, [site], logger, {"thresholds": {"cf_tf": 1}}
+            )
+
+            assert updated == 1
+            assert cursor.execute.call_args_list[1][0][1][4] == new
+            reported.extend(changes)
+
+        assert len(reported) == 1
+        message = format_metric_changes_message(reported)
+        assert "<b>alcargo.ru</b> 👑" in message
+        assert "TF/CF: 29 → <b>30</b>" in message
+
     def _make_conn(self, rows):
         conn = Mock()
         cursor = Mock()

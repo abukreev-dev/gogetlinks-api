@@ -35,6 +35,8 @@ from urllib.parse import urlparse
 import csv
 import io
 
+from ggl_top import GGL_TOP_DOMAINS
+
 import mysql.connector
 import requests
 from mysql.connector import MySQLConnection
@@ -126,7 +128,7 @@ NO_NEW_TASKS_THRESHOLD_DAYS = 5
 # Values can be overridden via [metrics] section in config.ini.
 METRIC_DEFAULT_THRESHOLDS = {
     "sqi": 10,
-    "cf_tf": 1,
+    "cf_tf": 2,
     "pr_cy": 1,
     "trust": 1,
     "indexation": 5,
@@ -1954,6 +1956,13 @@ def is_metric_change_significant(
     if delta == 0:
         return False
 
+    if metric == "cf_tf":
+        # Always report reaching the goal, including gradual one-point growth.
+        if old_number < 30 <= new_number:
+            return True
+        # Existing config.ini files may still contain the former threshold of 1.
+        return delta >= max(2, thresholds.get(metric, 2))
+
     if metric == "traffic":
         if old_number == 0:
             return new_number > 0
@@ -2774,9 +2783,11 @@ def format_metric_changes_message(changes: List[Dict[str, Any]]) -> str:
     ]
 
     for item in changes:
-        site = html.escape(str(item.get("site", "—")))
+        host = str(item.get("site", "—"))
+        site = html.escape(host)
+        priority_mark = " 👑" if host.strip().lower() in GGL_TOP_DOMAINS else ""
         lines.append("")
-        lines.append(f"<b>{site}</b>")
+        lines.append(f"<b>{site}</b>{priority_mark}")
         for change in item.get("changes", []):
             label = html.escape(str(change.get("label", "—")))
             old_value = html.escape(str(change.get("old", "—")))
