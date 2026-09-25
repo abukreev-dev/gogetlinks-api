@@ -628,6 +628,13 @@ grep "Total execution time" logs/gogetlinks_parser.log | awk '{print $NF}' | sor
 - Telegram section in config is optional (fallback defaults if missing)
 - Session cookies saved to `session_cookies.pkl` (gitignored, chmod 600) — stale file auto-deleted on expired session
 - Tests: 72 tests with real assertions (parser, details, telegram, html cleaning, cookie session, db)
+- Article orders (`ddl.ggl_article_order`) are the exchange with DDL: the parser writes the
+  order and reads the result, DDL writes and publishes the article. The table is created by
+  a DDL migration, not by `schema.sql` — see `docs/TZ_ggl_article_order.md`
+- `--orders` and `--cancel-order` are DB-only modes: they imply `--skip-tasks --skip-sites`,
+  so no browser is started even without those flags
+- Anchor lives on the `[Анкор] ...` line of `ggl_tasks.description`; a trailing `(...)` is
+  only treated as the inflection note when it says so, otherwise it stays part of the anchor
 
 ---
 

@@ -15,6 +15,7 @@ Exit Codes:
     3  - Configuration error
     4  - Database error
     5  - WebDriver error
+    6  - Not found (--cancel-order: no such order or already cancelled)
     99 - Unexpected error
 """
 
@@ -85,6 +86,8 @@ DB_TABLE = "ggl_tasks"
 DB_FULL_TABLE = f"{DB_SCHEMA}.{DB_TABLE}"
 DB_LINKS_TABLE = "ggl_links"
 DB_FULL_LINKS_TABLE = f"{DB_SCHEMA}.{DB_LINKS_TABLE}"
+DB_ORDERS_TABLE = "ggl_article_order"
+DB_FULL_ORDERS_TABLE = f"{DB_SCHEMA}.{DB_ORDERS_TABLE}"
 
 # Timeouts
 CAPTCHA_TIMEOUT = 120
@@ -96,6 +99,7 @@ LINK_CHECK_TIMEOUT = 10
 
 # Exit codes
 EXIT_SUCCESS = 0
+EXIT_NOT_FOUND = 6
 EXIT_AUTH_FAILED = 1
 EXIT_CAPTCHA_FAILED = 2
 EXIT_CONFIG_ERROR = 3
@@ -123,6 +127,14 @@ DETAIL_REQUEST_DELAY = 1.5
 
 # Stale tasks alert
 NO_NEW_TASKS_THRESHOLD_DAYS = 5
+
+# Article orders (ddl.ggl_article_order): only "Статья" tasks are taken.
+ORDER_TASK_TITLE = "Статья"
+ORDER_MARKER_ANCHOR = "[Анкор]"
+ORDER_STUCK_ATTEMPTS = 3
+ORDER_STUCK_STATE_FILE = os.getenv(
+    "GGL_ORDER_STUCK_STATE_FILE", "logs/order_stuck_notified.json"
+).strip()
 
 # Metric change alerts (/mySites): minimal delta worth a Telegram message.
 # Values can be overridden via [metrics] section in config.ini.
@@ -2626,6 +2638,562 @@ def send_links_check_notification(
 
 
 # =============================================================================
+# ARTICLE ORDERS (ddl.ggl_article_order)
+# =============================================================================
+
+# Trailing note in square brackets that ends the anchor line, e.g. "[Комментарий]".
+ORDER_BRACKET_MARKER_RE = re.compile(r"\[[^\]\n]{1,40}\]")
+
+# Trailing "(...)" note after the anchor: "(в любом падеже )",
+# "(склонять анкор нельзя )".
+ORDER_ANCHOR_NOTE_RE = re.compile(r"\(([^()]*)\)\s*$")
+
+
+def parse_anchor(description: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Parse anchor and inflection flag out of a task description.
+
+    The description starts with the "[Анкор] <anchor> (<note>)" line, followed
+    by free-form buyer requirements. The note tells whether the anchor may be
+    inflected; a trailing "(...)" that is not such a note stays part of the
+    anchor (e.g. "Термокамеры (коптильные) для ... копчения").
+
+    Args:
+        description: Full `ggl_tasks.description` text.
+
+    Returns:
+        Dict with keys `anchor` (str), `anchor_inflect` (0/1) and `multiple`
+        (True when the description contains more than one anchor marker), or
+        None when no anchor could be parsed.
+    """
+    if not description:
+        return None
+
+    positions = [
+        m.start() for m in re.finditer(re.escape(ORDER_MARKER_ANCHOR), description)
+    ]
+    if not positions:
+        return None
+
+    marker_end = positions[0] + len(ORDER_MARKER_ANCHOR)
+    tail = description[marker_end:]
+
+    # The anchor lives on a single line, possibly followed by another marker.
+    cut = tail.find("\n")
+    if cut == -1:
+        cut = len(tail)
+    marker = ORDER_BRACKET_MARKER_RE.search(tail[:cut])
+    if marker:
+        cut = marker.start()
+
+    anchor = tail[:cut].strip()
+
+    anchor_inflect = 0
+    note = ORDER_ANCHOR_NOTE_RE.search(anchor)
+    if note:
+        note_text = note.group(1).strip().lower()
+        if "падеж" in note_text:
+            anchor_inflect = 1
+            anchor = anchor[: note.start()].strip()
+        elif "склонять" in note_text and "нельз" in note_text:
+            anchor_inflect = 0
+            anchor = anchor[: note.start()].strip()
+
+    if not anchor:
+        return None
+
+    return {
+        "anchor": anchor[:500],
+        "anchor_inflect": anchor_inflect,
+        "multiple": len(positions) > 1,
+    }
+
+
+def insert_article_order(
+    conn: MySQLConnection,
+    task: Dict[str, Any],
+    parsed_anchor: Dict[str, Any],
+    logger: logging.Logger,
+) -> Optional[bool]:
+    """Hand a new "Статья" task over to DDL via `ggl_article_order`.
+
+    Args:
+        conn: MySQL connection
+        task: Task dictionary as parsed from gogetlinks
+        parsed_anchor: Result of :func:`parse_anchor`
+        logger: Logger instance
+
+    Returns:
+        True if the order was created, False if it already existed,
+        None on database error.
+    """
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            f"""
+            INSERT IGNORE INTO {DB_FULL_ORDERS_TABLE} (
+                task_id, domain, target_url, anchor, anchor_inflect,
+                requirements, price, status
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, 'new')
+            """,
+            (
+                task["task_id"],
+                task.get("domain"),
+                task.get("url"),
+                parsed_anchor["anchor"],
+                parsed_anchor["anchor_inflect"],
+                task.get("description"),
+                task.get("price"),
+            ),
+        )
+        conn.commit()
+
+        created = cursor.rowcount == 1
+        if created:
+            logger.info(
+                "Article order created: task=%s domain=%s anchor=%r inflect=%s",
+                task["task_id"],
+                task.get("domain"),
+                parsed_anchor["anchor"],
+                parsed_anchor["anchor_inflect"],
+            )
+        else:
+            logger.debug("Article order already exists: task=%s", task["task_id"])
+        return created
+
+    except mysql.connector.Error as e:
+        logger.error(
+            "Failed to create article order for task %s: %s", task["task_id"], e
+        )
+        conn.rollback()
+        return None
+    finally:
+        cursor.close()
+
+
+def format_order_anchor_failed_message(task: Dict[str, Any]) -> str:
+    """Format Telegram message for a "Статья" task with unparsed anchor."""
+    task_id = task.get("task_id", "—")
+    price = task.get("price")
+    price_str = f"{price:.0f} ₽" if price and price > 0 else "бесплатно"
+
+    lines = [
+        "<b>Есть заказ, анкор не распознан</b>",
+        f"Сайт: {html.escape(str(task.get('domain') or '—'))}",
+        f"Цена: {price_str}",
+        f'<a href="{TASK_DETAIL_URL.format(task_id)}">Задача {task_id}</a>',
+        "",
+        "<b>Полный текст задачи:</b>",
+        f"<pre>{html.escape(str(task.get('description') or '—'))}</pre>",
+    ]
+    message = "\n".join(lines)
+
+    if len(message) > TELEGRAM_MAX_MESSAGE_LENGTH:
+        message = message[: TELEGRAM_MAX_MESSAGE_LENGTH - 30] + "\n<i>...обрезано</i>"
+
+    return message
+
+
+def format_order_multiple_anchors_message(
+    task: Dict[str, Any], parsed_anchor: Dict[str, Any]
+) -> str:
+    """Format Telegram message for a task with several anchors."""
+    task_id = task.get("task_id", "—")
+    lines = [
+        "<b>В заказе несколько анкоров, взят первый</b>",
+        f"Сайт: {html.escape(str(task.get('domain') or '—'))}",
+        f"Анкор: {html.escape(parsed_anchor['anchor'])}",
+        f'<a href="{TASK_DETAIL_URL.format(task_id)}">Задача {task_id}</a>',
+        "",
+        f"<pre>{html.escape(str(task.get('description') or '—'))}</pre>",
+    ]
+    message = "\n".join(lines)
+
+    if len(message) > TELEGRAM_MAX_MESSAGE_LENGTH:
+        message = message[: TELEGRAM_MAX_MESSAGE_LENGTH - 30] + "\n<i>...обрезано</i>"
+
+    return message
+
+
+def format_order_ready_message(order: Dict[str, Any]) -> str:
+    """Format "Заказ готов" Telegram message."""
+    task_id = order.get("task_id", "—")
+    price = order.get("price")
+    price_str = f"{price:.0f} ₽" if price and price > 0 else "бесплатно"
+    inflect = "можно склонять" if order.get("anchor_inflect") else "склонять нельзя"
+
+    lines = [
+        "<b>Заказ готов</b>",
+        f"Сайт: {html.escape(str(order.get('domain') or '—'))}",
+        f"Цена: {price_str}",
+        f"Анкор: {html.escape(str(order.get('anchor') or '—'))} ({inflect})",
+        f"Целевой URL: {html.escape(str(order.get('target_url') or '—'))}",
+        "",
+        f'<a href="{html.escape(str(order.get("article_url") or ""))}">Статья</a>'
+        f' | <a href="{TASK_DETAIL_URL.format(task_id)}">Задача {task_id}</a>',
+        "",
+        "Сдать заказ на gogetlinks вручную.",
+    ]
+    return "\n".join(lines)
+
+
+def format_order_cancelled_message(order: Dict[str, Any]) -> str:
+    """Format "Заказ снят" Telegram message."""
+    task_id = order.get("task_id", "—")
+    lines = [
+        "<b>Заказ снят</b>",
+        f"Сайт: {html.escape(str(order.get('domain') or '—'))}",
+        f"Анкор: {html.escape(str(order.get('anchor') or '—'))}",
+        f'<a href="{TASK_DETAIL_URL.format(task_id)}">Задача {task_id}</a>',
+    ]
+    return "\n".join(lines)
+
+
+def format_order_stuck_message(order: Dict[str, Any]) -> str:
+    """Format "заказ не выходит" Telegram message."""
+    task_id = order.get("task_id", "—")
+    lines = [
+        "<b>Заказ не выходит</b>",
+        f"Сайт: {html.escape(str(order.get('domain') or '—'))}",
+        f"Анкор: {html.escape(str(order.get('anchor') or '—'))}",
+        f"Попыток: {order.get('attempts', 0)}",
+        f"Ошибка: {html.escape(str(order.get('error') or '—'))}",
+        f'<a href="{TASK_DETAIL_URL.format(task_id)}">Задача {task_id}</a>',
+    ]
+    message = "\n".join(lines)
+
+    if len(message) > TELEGRAM_MAX_MESSAGE_LENGTH:
+        message = message[: TELEGRAM_MAX_MESSAGE_LENGTH - 30] + "\n<i>...обрезано</i>"
+
+    return message
+
+
+def send_order_telegram_message(
+    message: str,
+    config: Dict[str, Any],
+    logger: logging.Logger,
+    context: str = "order",
+) -> bool:
+    """Send a single pre-formatted HTML message about an article order.
+
+    Args:
+        message: Ready HTML message text
+        config: Full configuration dictionary
+        logger: Logger instance
+        context: Short label for log messages
+
+    Returns:
+        True if the message was accepted by Telegram, False otherwise.
+    """
+    telegram_config = config["telegram"]
+
+    if not telegram_config.get("enabled"):
+        logger.debug("Telegram notifications disabled (%s)", context)
+        return False
+
+    bot_token = telegram_config.get("bot_token", "")
+    chat_id = telegram_config.get("chat_id", "")
+    if not bot_token or not chat_id:
+        logger.warning("Telegram bot_token or chat_id not configured (%s)", context)
+        return False
+
+    mention = telegram_config.get("mention", "")
+    if mention:
+        message = f"{message}\n{mention}"
+
+    payload = {
+        "chat_id": chat_id,
+        "text": message,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }
+    request_kwargs: Dict[str, Any] = {"json": payload, "timeout": 30}
+    proxies = get_telegram_proxies(telegram_config)
+    if proxies:
+        request_kwargs["proxies"] = proxies
+
+    try:
+        response = requests.post(TELEGRAM_API_URL.format(bot_token), **request_kwargs)
+        response.raise_for_status()
+        result = response.json()
+        if result.get("ok"):
+            logger.info("Telegram message sent (%s)", context)
+            return True
+        logger.error("Telegram API error (%s): %s", context, result.get("description"))
+        return False
+    except requests.RequestException as e:
+        logger.error("Failed to send Telegram message (%s): %s", context, e)
+        return False
+
+
+def process_new_article_orders(
+    conn: MySQLConnection,
+    new_tasks: List[Dict[str, Any]],
+    config: Dict[str, Any],
+    logger: logging.Logger,
+) -> int:
+    """Create article orders for new "Статья" tasks.
+
+    Args:
+        conn: MySQL connection
+        new_tasks: Tasks that were inserted on this run
+        config: Full configuration dictionary
+        logger: Logger instance
+
+    Returns:
+        Number of created orders.
+    """
+    created = 0
+
+    for task in new_tasks:
+        title = (task.get("title") or "").strip()
+        if title != ORDER_TASK_TITLE:
+            continue
+
+        parsed = parse_anchor(task.get("description"))
+        if parsed is None:
+            logger.warning(
+                "Anchor not parsed for task %s, order not created", task["task_id"]
+            )
+            send_order_telegram_message(
+                format_order_anchor_failed_message(task),
+                config,
+                logger,
+                context="anchor not parsed",
+            )
+            continue
+
+        result = insert_article_order(conn, task, parsed, logger)
+        if result is True:
+            created += 1
+            if parsed["multiple"]:
+                send_order_telegram_message(
+                    format_order_multiple_anchors_message(task, parsed),
+                    config,
+                    logger,
+                    context="multiple anchors",
+                )
+
+    if created:
+        logger.info("Article orders created: %d", created)
+
+    return created
+
+
+def load_stuck_notified(logger: logging.Logger) -> Dict[str, Any]:
+    """Load task ids already reported as stuck.
+
+    The order table belongs to DDL, so the "already reported" flag is kept on
+    the parser side in a small JSON file.
+    """
+    try:
+        with open(ORDER_STUCK_STATE_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return data
+        logger.warning("Unexpected stuck-state format, ignoring")
+    except FileNotFoundError:
+        pass
+    except (OSError, ValueError) as e:
+        logger.warning("Failed to read stuck-state file: %s", e)
+    return {}
+
+
+def save_stuck_notified(state: Dict[str, Any], logger: logging.Logger) -> None:
+    """Persist task ids already reported as stuck."""
+    try:
+        directory = os.path.dirname(ORDER_STUCK_STATE_FILE)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        with open(ORDER_STUCK_STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+    except OSError as e:
+        logger.warning("Failed to write stuck-state file: %s", e)
+
+
+def mark_order_notified(
+    conn: MySQLConnection, order_id: int, logger: logging.Logger
+) -> bool:
+    """Set `notified_at` for an order after a successful Telegram message."""
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            f"UPDATE {DB_FULL_ORDERS_TABLE} SET notified_at = NOW() WHERE id = %s",
+            (order_id,),
+        )
+        conn.commit()
+        return True
+    except mysql.connector.Error as e:
+        logger.error("Failed to mark order %s as notified: %s", order_id, e)
+        conn.rollback()
+        return False
+    finally:
+        cursor.close()
+
+
+def fetch_orders(
+    conn: MySQLConnection, where: str, params: Tuple[Any, ...], logger: logging.Logger
+) -> List[Dict[str, Any]]:
+    """Select orders matching a WHERE clause."""
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute(
+            f"""
+            SELECT id, task_id, domain, target_url, anchor, anchor_inflect,
+                   price, status, article_url, error, attempts
+            FROM {DB_FULL_ORDERS_TABLE}
+            WHERE {where}
+            ORDER BY id
+            """,
+            params,
+        )
+        # Dictionary cursors are untyped in the connector stubs.
+        rows: Any = cursor.fetchall()
+        return list(rows)
+    except mysql.connector.Error as e:
+        logger.error("Failed to select article orders: %s", e)
+        return []
+    finally:
+        cursor.close()
+
+
+def process_orders(
+    conn: MySQLConnection,
+    config: Dict[str, Any],
+    logger: logging.Logger,
+) -> Dict[str, int]:
+    """Report finished, cancelled and stuck article orders to Telegram.
+
+    Light mode without Selenium, meant to run by cron every 10-15 minutes.
+
+    Args:
+        conn: MySQL connection
+        config: Full configuration dictionary
+        logger: Logger instance
+
+    Returns:
+        Counters: how many messages of each kind were sent.
+    """
+    counters = {"ready": 0, "cancelled": 0, "stuck": 0}
+
+    ready = fetch_orders(
+        conn, "status = 'published' AND notified_at IS NULL", (), logger
+    )
+    for order in ready:
+        if send_order_telegram_message(
+            format_order_ready_message(order), config, logger, context="order ready"
+        ):
+            mark_order_notified(conn, order["id"], logger)
+            counters["ready"] += 1
+
+    cancelled = fetch_orders(
+        conn, "status = 'cancelled' AND notified_at IS NULL", (), logger
+    )
+    for order in cancelled:
+        if send_order_telegram_message(
+            format_order_cancelled_message(order),
+            config,
+            logger,
+            context="order cancelled",
+        ):
+            mark_order_notified(conn, order["id"], logger)
+            counters["cancelled"] += 1
+
+    stuck = fetch_orders(
+        conn,
+        "status = 'working' AND attempts >= %s",
+        (ORDER_STUCK_ATTEMPTS,),
+        logger,
+    )
+    if stuck:
+        notified = load_stuck_notified(logger)
+        changed = False
+        for order in stuck:
+            key = str(order["task_id"])
+            if key in notified:
+                continue
+            if send_order_telegram_message(
+                format_order_stuck_message(order),
+                config,
+                logger,
+                context="order stuck",
+            ):
+                notified[key] = order.get("attempts", 0)
+                changed = True
+                counters["stuck"] += 1
+        if changed:
+            save_stuck_notified(notified, logger)
+
+    logger.info(
+        "Orders processed: ready=%d, cancelled=%d, stuck=%d",
+        counters["ready"],
+        counters["cancelled"],
+        counters["stuck"],
+    )
+    return counters
+
+
+def cancel_order(
+    conn: MySQLConnection, task_id: int, logger: logging.Logger
+) -> Optional[bool]:
+    """Request cancellation of an article order.
+
+    Args:
+        conn: MySQL connection
+        task_id: gogetlinks task id
+        logger: Logger instance
+
+    Returns:
+        True if `status` was set to 'cancel', False if there is no such order
+        or it is already cancelled, None on database error.
+    """
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute(
+            f"SELECT id, status FROM {DB_FULL_ORDERS_TABLE} WHERE task_id = %s",
+            (task_id,),
+        )
+        order: Any = cursor.fetchone()
+    except mysql.connector.Error as e:
+        logger.error("Failed to look up order %s: %s", task_id, e)
+        return None
+    finally:
+        cursor.close()
+
+    if order is None:
+        logger.warning("No article order for task %s", task_id)
+        return False
+
+    if order["status"] in ("cancel", "cancelled"):
+        logger.info(
+            "Article order %s is already %s, nothing to do", task_id, order["status"]
+        )
+        return False
+
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            f"""UPDATE {DB_FULL_ORDERS_TABLE}
+                SET status = 'cancel', notified_at = NULL
+                WHERE id = %s AND status <> 'cancelled'
+            """,
+            (order["id"],),
+        )
+        conn.commit()
+        if cursor.rowcount == 1:
+            logger.info("Article order %s set to cancel", task_id)
+            return True
+        logger.warning("Article order %s was not updated", task_id)
+        return False
+    except mysql.connector.Error as e:
+        logger.error("Failed to cancel order %s: %s", task_id, e)
+        conn.rollback()
+        return None
+    finally:
+        cursor.close()
+
+
+# =============================================================================
 # OUTPUT
 # =============================================================================
 
@@ -3113,6 +3681,23 @@ def parse_cli_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="Warm link cache by sending GET to each URL in ggl_links",
     )
+    parser.add_argument(
+        "--orders",
+        action="store_true",
+        help=(
+            "Report ready/cancelled/stuck article orders from ggl_article_order "
+            "to Telegram (no Selenium, implies --skip-tasks --skip-sites)"
+        ),
+    )
+    parser.add_argument(
+        "--cancel-order",
+        type=int,
+        metavar="TASK_ID",
+        help=(
+            "Request cancellation of an article order by gogetlinks task id "
+            "(no Selenium, implies --skip-tasks --skip-sites)"
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -3130,14 +3715,28 @@ def main(argv: Optional[List[str]] = None) -> int:
     try:
         args = parse_cli_args(argv)
 
-        needs_tasks = not args.skip_tasks
-        needs_sites = not args.skip_sites
+        needs_orders = args.orders
+        cancel_order_task_id = args.cancel_order
+
+        # Order modes are DB-only and run by their own cron line, so they never
+        # drag the heavy Selenium stages along.
+        orders_only = needs_orders or cancel_order_task_id is not None
+
+        needs_tasks = not args.skip_tasks and not orders_only
+        needs_sites = not args.skip_sites and not orders_only
         needs_sync_links = args.sync_links
         needs_check_links = args.check_links
         needs_warm_links = args.warm_links
         needs_selenium = needs_tasks or needs_sites or needs_sync_links
 
-        if not needs_tasks and not needs_sites and not needs_sync_links and not needs_check_links and not needs_warm_links:
+        if (
+            not needs_tasks
+            and not needs_sites
+            and not needs_sync_links
+            and not needs_check_links
+            and not needs_warm_links
+            and not orders_only
+        ):
             logger = setup_logger()
             logger.warning("Nothing to do (all stages skipped)")
             return EXIT_SUCCESS
@@ -3180,6 +3779,21 @@ def main(argv: Optional[List[str]] = None) -> int:
         except mysql.connector.Error as e:
             logger.error(f"Database error: {e}")
             return EXIT_DATABASE_ERROR
+
+        # --cancel-order: DB-only, nothing else runs in this mode
+        if cancel_order_task_id is not None:
+            logger.info("Cancelling article order %s", cancel_order_task_id)
+            result = cancel_order(conn, cancel_order_task_id, logger)
+            if result is None:
+                return EXIT_DATABASE_ERROR
+            if result is False:
+                return EXIT_NOT_FOUND
+            return EXIT_SUCCESS
+
+        # --orders: DB + Telegram only
+        if needs_orders:
+            logger.info("Processing article orders (--orders)")
+            process_orders(conn, config, logger)
 
         # --warm-links / --check-links: no Selenium needed, just DB + HTTP
         if needs_warm_links:
@@ -3296,6 +3910,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                 # 8. Send Telegram notification for new tasks
                 if len(new_tasks) > 0:
                     send_telegram_notification(new_tasks, config, logger)
+
+                    # 8a. Hand new "Статья" tasks over to DDL for generation
+                    process_new_article_orders(conn, new_tasks, config, logger)
 
                 # 9. Print output (if enabled)
                 print_tasks(tasks, config["output"]["print_to_console"])

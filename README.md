@@ -43,7 +43,20 @@ crontab -e
 CRON_TZ=Europe/Moscow
 0 * * * * cd ~/gogetlinks-api && venv/bin/python gogetlinks_parser.py --skip-sites >> /var/log/gogetlinks_cron.log 2>&1
 15 7 * * * cd ~/gogetlinks-api && venv/bin/python gogetlinks_parser.py --skip-tasks >> /var/log/gogetlinks_cron.log 2>&1
+*/10 * * * * cd ~/gogetlinks-api && venv/bin/python gogetlinks_parser.py --orders >> /var/log/gogetlinks_cron.log 2>&1
 ```
+
+### Заказные статьи
+
+Задачи типа «Статья» передаются в DDL через `ddl.ggl_article_order`, DDL пишет
+и публикует статью, парсер забирает результат и шлёт в ТГ «Заказ готов».
+
+```bash
+venv/bin/python gogetlinks_parser.py --orders                # забрать результат (без Selenium)
+venv/bin/python gogetlinks_parser.py --cancel-order 25387793  # отказаться от заказа
+```
+
+Подробнее — [docs/TZ_ggl_article_order.md](docs/TZ_ggl_article_order.md).
 
 ## 📚 Документация
 
