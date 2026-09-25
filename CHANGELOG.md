@@ -13,7 +13,8 @@
   и публикует статью, парсер забирает результат. Контракт —
   `garden-network/docs/TZ-ggl-orders.md`, сторона парсера —
   [docs/TZ_ggl_article_order.md](docs/TZ_ggl_article_order.md).
-  Таблицу создаёт миграция DDL.
+  Таблица принадлежит схеме DDL; накачена вручную 25.09.2026, SQL для сверки —
+  [docs/sql/ggl_article_order.sql](docs/sql/ggl_article_order.sql).
 - `parse_anchor()` — разбор анкора и пометки «в любом падеже» / «склонять анкор нельзя»
   из `ggl_tasks.description`. Скобки внутри анкора пометкой не считаются. Проверено на
   всех 113 описаниях из базы.
