@@ -7,6 +7,7 @@ import mysql.connector
 import pytest
 from unittest.mock import Mock, call
 from gogetlinks_parser import (
+    insert_or_update_task,
     task_has_details,
     extract_digits_only,
     save_sites_to_db,
@@ -260,3 +261,81 @@ class TestDatabaseDeduplication:
         """Тест ON DUPLICATE KEY UPDATE логики"""
         # TODO: Интеграционный тест с реальной БД
         pass
+
+
+class TestInsertOrUpdateTaskKeepsDetails:
+    """Детали задачи не затираются прогоном, который пропустил модалку."""
+
+    DETAIL_FIELDS = (
+        "description",
+        "url",
+        "requirements",
+        "contacts",
+        "deadline",
+    )
+
+    def _make_task(self, **overrides):
+        task = {
+            "task_id": 12345,
+            "domain": "a.ru",
+            "customer": "buyer",
+            "customer_url": None,
+            "external_links": 1,
+            "title": "Статья",
+            "time_passed": "1 час",
+            "price": 350.0,
+            "description": None,
+            "url": None,
+            "requirements": None,
+            "contacts": None,
+            "deadline": None,
+        }
+        task.update(overrides)
+        return task
+
+    def _execute_sql(self, task):
+        cursor = Mock()
+        cursor.rowcount = 2
+        conn = Mock()
+        conn.cursor.return_value = cursor
+        logger = logging.getLogger("test")
+
+        insert_or_update_task(conn, task, logger)
+
+        return cursor.execute.call_args[0][0]
+
+    def test_detail_fields_wrapped_in_coalesce(self):
+        """ON DUPLICATE KEY UPDATE сохраняет прежнее значение при NULL.
+
+        Регрессия: прогон, где модалка пропущена (task_has_details → True),
+        передаёт детали как None. С `description = VALUES(description)`
+        уже разобранное описание затиралось, и заказ по такой задаче
+        построить было нельзя.
+        """
+        sql = self._execute_sql(self._make_task())
+
+        for field in self.DETAIL_FIELDS:
+            assert (
+                f"{field} = COALESCE(VALUES({field}), {field})" in sql
+            ), f"{field} затирается NULL-ом"
+
+    def test_list_fields_still_overwritten(self):
+        """Поля из списка задач обновляются как раньше: они всегда приходят."""
+        sql = self._execute_sql(self._make_task())
+
+        for field in ("price", "time_passed", "external_links"):
+            assert f"{field} = VALUES({field})" in sql
+            assert f"COALESCE(VALUES({field})" not in sql
+
+    def test_skipped_run_passes_none_for_details(self):
+        """Прогон без модалки передаёт None — отсюда и затирание."""
+        cursor = Mock()
+        cursor.rowcount = 2
+        conn = Mock()
+        conn.cursor.return_value = cursor
+
+        logger = logging.getLogger("test")
+        insert_or_update_task(conn, self._make_task(), logger)
+
+        params = cursor.execute.call_args[0][1]
+        assert params[8:13] == (None, None, None, None, None)

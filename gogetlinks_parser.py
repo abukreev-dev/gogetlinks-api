@@ -597,11 +597,14 @@ def insert_or_update_task(
                 title = VALUES(title),
                 time_passed = VALUES(time_passed),
                 price = VALUES(price),
-                description = VALUES(description),
-                url = VALUES(url),
-                requirements = VALUES(requirements),
-                contacts = VALUES(contacts),
-                deadline = VALUES(deadline),
+                -- Detail fields are only fetched for tasks that lack them
+                -- (see task_has_details), so on a run that skipped the modal
+                -- they arrive as NULL. Keep the stored value in that case.
+                description = COALESCE(VALUES(description), description),
+                url = COALESCE(VALUES(url), url),
+                requirements = COALESCE(VALUES(requirements), requirements),
+                contacts = COALESCE(VALUES(contacts), contacts),
+                deadline = COALESCE(VALUES(deadline), deadline),
                 is_new = 0,
                 updated_at = CURRENT_TIMESTAMP
         """
