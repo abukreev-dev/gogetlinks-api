@@ -132,6 +132,8 @@ NO_NEW_TASKS_THRESHOLD_DAYS = 5
 ORDER_TASK_TITLE = "Статья"
 ORDER_MARKER_ANCHOR = "[Анкор]"
 ORDER_STUCK_ATTEMPTS = 3
+# How long an order must sit untouched before "заказ не выходит" is sent.
+ORDER_STUCK_IDLE_MINUTES = 30
 ORDER_STUCK_STATE_FILE = os.getenv(
     "GGL_ORDER_STUCK_STATE_FILE", "logs/order_stuck_notified.json"
 ).strip()
@@ -3102,10 +3104,14 @@ def process_orders(
             mark_order_notified(conn, order["id"], logger)
             counters["cancelled"] += 1
 
+    # DDL spends up to three attempts on ordinary text rewrites (link count,
+    # link placement), so `attempts` alone does not mean the order is stuck.
+    # Report only orders that have also stopped moving.
     stuck = fetch_orders(
         conn,
-        "status = 'working' AND attempts >= %s",
-        (ORDER_STUCK_ATTEMPTS,),
+        "status = 'working' AND attempts >= %s"
+        " AND updated_at < NOW() - INTERVAL %s MINUTE",
+        (ORDER_STUCK_ATTEMPTS, ORDER_STUCK_IDLE_MINUTES),
         logger,
     )
     if stuck:

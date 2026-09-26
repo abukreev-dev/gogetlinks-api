@@ -15,6 +15,7 @@ from gogetlinks_parser import (
     EXIT_NOT_FOUND,
     EXIT_SUCCESS,
     ORDER_STUCK_ATTEMPTS,
+    ORDER_STUCK_IDLE_MINUTES,
     cancel_order,
     format_order_anchor_failed_message,
     format_order_cancelled_message,
@@ -516,7 +517,31 @@ def test_process_orders_stuck_query_uses_threshold(
     where_clauses = [c[0][1] for c in fetch.call_args_list]
     assert "status = 'published' AND notified_at IS NULL" in where_clauses
     assert "status = 'cancelled' AND notified_at IS NULL" in where_clauses
-    assert fetch.call_args_list[2][0][2] == (ORDER_STUCK_ATTEMPTS,)
+    assert fetch.call_args_list[2][0][2] == (
+        ORDER_STUCK_ATTEMPTS,
+        ORDER_STUCK_IDLE_MINUTES,
+    )
+
+
+def test_process_orders_stuck_query_requires_idle_order(
+    conn, logger, telegram_config, tmp_path
+):
+    """Одних попыток мало: DDL тратит 3 штатно на переделку текста.
+
+    Заказ считается застрявшим только если он ещё и перестал двигаться,
+    иначе «заказ не выходит» уходит по заказу, который через минуту
+    опубликуется (живой случай: заказ 25394998, 3 попытки, опубликован).
+    """
+    state = str(tmp_path / "stuck.json")
+    with patch("gogetlinks_parser.ORDER_STUCK_STATE_FILE", state), patch(
+        "gogetlinks_parser.fetch_orders", return_value=[]
+    ) as fetch:
+        process_orders(conn, telegram_config, logger)
+
+    stuck_where = fetch.call_args_list[2][0][1]
+    assert "status = 'working'" in stuck_where
+    assert "attempts >= %s" in stuck_where
+    assert "updated_at < NOW() - INTERVAL %s MINUTE" in stuck_where
 
 
 # =============================================================================
