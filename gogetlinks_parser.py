@@ -95,6 +95,9 @@ CAPTCHA_POLL_INTERVAL = 5
 MAX_RETRIES = 3
 PAGE_LOAD_TIMEOUT = 10
 IMPLICIT_WAIT = 5
+PAGE_NAVIGATION_TIMEOUT = 45
+NAVIGATION_RETRY_ATTEMPTS = 3
+NAVIGATION_RETRY_DELAY = 5
 LINK_CHECK_TIMEOUT = 10
 
 # Exit codes
@@ -715,6 +718,11 @@ def initialize_driver(
         logger.info("Initializing Chrome WebDriver")
 
     options = Options()
+    # Ждать DOMContentLoaded, а не полной загрузки всех подресурсов: один
+    # зависший сторонний ресурс иначе держит driver.get() до таймаута и
+    # отнимает слот крона. Нужные элементы всё равно ждём через
+    # WebDriverWait.
+    options.page_load_strategy = "eager"
     options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
@@ -732,12 +740,51 @@ def initialize_driver(
     try:
         driver = webdriver.Chrome(options=options)
         driver.implicitly_wait(IMPLICIT_WAIT)
+        driver.set_page_load_timeout(PAGE_NAVIGATION_TIMEOUT)
         logger.info("WebDriver initialized successfully")
         return driver
 
     except WebDriverException as e:
         logger.error(f"Failed to initialize WebDriver: {e}")
         raise
+
+
+def navigate_with_retry(
+    driver: webdriver.Chrome,
+    url: str,
+    logger: logging.Logger,
+    attempts: int = NAVIGATION_RETRY_ATTEMPTS,
+) -> bool:
+    """Open URL, retrying on hung page loads.
+
+    Without a page load timeout Chrome can hang until Selenium's own 120s
+    HTTP timeout fires and kills the whole run. A bounded timeout plus a
+    few retries keeps a single stalled request from costing a cron slot.
+
+    Args:
+        driver: Chrome WebDriver
+        url: Target URL
+        logger: Logger instance
+        attempts: How many times to try before giving up
+
+    Returns:
+        True if the page was opened, False if every attempt failed
+    """
+    for attempt in range(1, attempts + 1):
+        try:
+            driver.get(url)
+            return True
+
+        except (TimeoutException, WebDriverException) as e:
+            logger.warning(
+                f"Navigation to {url} failed "
+                f"(attempt {attempt}/{attempts}): {type(e).__name__}"
+            )
+            if attempt < attempts:
+                time.sleep(NAVIGATION_RETRY_DELAY)
+
+    logger.error(f"Navigation to {url} failed after {attempts} attempts")
+    return False
 
 
 def is_anti_bot_blocked(driver: webdriver.Chrome) -> bool:
@@ -1004,7 +1051,9 @@ def authenticate(
     try:
         # Navigate to home page first
         logger.debug(f"Navigating to {HOME_URL}")
-        driver.get(HOME_URL)
+        if not navigate_with_retry(driver, HOME_URL, logger):
+            logger.error("Failed to open home page")
+            return False
 
         # Wait for page to fully load
         time.sleep(2)
@@ -1516,7 +1565,9 @@ def parse_task_list(
     try:
         # Navigate to task list page
         logger.debug(f"Navigating to {TASK_LIST_URL}")
-        driver.get(TASK_LIST_URL)
+        if not navigate_with_retry(driver, TASK_LIST_URL, logger):
+            logger.error("Failed to open task list page")
+            return []
 
         # Wait for task rows to load
         logger.debug("Waiting for task rows")

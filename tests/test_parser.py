@@ -7,6 +7,8 @@ import pytest
 from decimal import Decimal
 from unittest.mock import Mock, patch, MagicMock
 
+from selenium.common.exceptions import TimeoutException, WebDriverException
+
 from gogetlinks_parser import (
     parse_price,
     extract_task_id,
@@ -14,6 +16,7 @@ from gogetlinks_parser import (
     parse_task_details,
     sanitize_text,
     is_anti_bot_blocked,
+    navigate_with_retry,
 )
 
 
@@ -217,3 +220,43 @@ class TestAntiBotDetection:
         driver.current_url = "https://gogetlinks.net/"
         driver.page_source = "<html><a href='/user/signIn'>Войти</a></html>"
         assert is_anti_bot_blocked(driver) is False
+
+
+class TestNavigateWithRetry:
+    """Тесты навигации с ретраями"""
+
+    def test_returns_true_on_first_attempt(self, mock_driver, logger):
+        """Успешная загрузка с первой попытки — один вызов get()"""
+        assert navigate_with_retry(mock_driver, "https://example.com", logger) is True
+        assert mock_driver.get.call_count == 1
+
+    def test_retries_after_timeout_and_succeeds(self, mock_driver, logger):
+        """Зависшая загрузка не роняет прогон — вторая попытка проходит"""
+        mock_driver.get.side_effect = [TimeoutException("hung"), None]
+
+        with patch("gogetlinks_parser.time.sleep"):
+            result = navigate_with_retry(mock_driver, "https://example.com", logger)
+
+        assert result is True
+        assert mock_driver.get.call_count == 2
+
+    def test_returns_false_when_all_attempts_fail(self, mock_driver, logger):
+        """После исчерпания попыток возвращается False, исключение не всплывает"""
+        mock_driver.get.side_effect = WebDriverException("down")
+
+        with patch("gogetlinks_parser.time.sleep"):
+            result = navigate_with_retry(
+                mock_driver, "https://example.com", logger, attempts=3
+            )
+
+        assert result is False
+        assert mock_driver.get.call_count == 3
+
+    def test_respects_attempts_argument(self, mock_driver, logger):
+        """Количество попыток задаётся аргументом"""
+        mock_driver.get.side_effect = TimeoutException("hung")
+
+        with patch("gogetlinks_parser.time.sleep"):
+            navigate_with_retry(mock_driver, "https://example.com", logger, attempts=1)
+
+        assert mock_driver.get.call_count == 1
