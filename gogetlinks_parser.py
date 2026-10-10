@@ -133,6 +133,9 @@ NO_NEW_TASKS_THRESHOLD_DAYS = 5
 
 # Article orders (ddl.ggl_article_order): only "Статья" tasks are taken.
 ORDER_TASK_TITLE = "Статья"
+# Задание, по которому готовый текст уже дал рекламодатель: в строке списка
+# стоит иконка-подсказка, своего текста такому заданию не нужно.
+ADVERTISER_TEXT_MARKER = "предоставлен рекламодателем"
 ORDER_MARKER_ANCHOR = "[Анкор]"
 ORDER_STUCK_ATTEMPTS = 3
 # How long an order must sit untouched before "заказ не выходит" is sent.
@@ -1280,11 +1283,44 @@ def sanitize_text(text: str) -> str:
     return text.strip()
 
 
+def has_advertiser_text(actions_cell: WebElement, logger: logging.Logger) -> bool:
+    """Check if the task comes with a ready text from the advertiser.
+
+    The only marker on the list page is a tooltip icon in the actions cell
+    ("Текст предоставлен рекламодателем"), so the tooltip text is matched
+    rather than a CSS class, which the site changes more often.
+
+    Args:
+        actions_cell: Last cell of the task row
+        logger: Logger instance
+
+    Returns:
+        True if the advertiser tooltip is present.
+    """
+    try:
+        tooltips = actions_cell.find_elements(
+            By.CSS_SELECTOR, "[data-tooltip-head], [data-tooltip-body]"
+        )
+    except Exception as e:
+        logger.debug(f"Failed to read action tooltips: {e}")
+        return False
+
+    for el in tooltips:
+        parts = (
+            el.get_attribute("data-tooltip-head") or "",
+            el.get_attribute("data-tooltip-body") or "",
+        )
+        if ADVERTISER_TEXT_MARKER in " ".join(parts).lower():
+            return True
+
+    return False
+
+
 def parse_task_row(row: WebElement, logger: logging.Logger) -> Optional[Dict[str, Any]]:
     """Extract all fields from task row.
 
     Fields: task_id, title, domain, customer, customer_url,
-            external_links, time_passed, price
+            external_links, time_passed, price, advertiser_text
 
     Args:
         row: Selenium WebElement for task row
@@ -1348,6 +1384,12 @@ def parse_task_row(row: WebElement, logger: logging.Logger) -> Optional[Dict[str
         logger.debug(f"Task {task_id} price_text raw: {repr(price_text)}")
         price = parse_price(price_text)
 
+        # Cell 6: actions — tooltip icons, including "Текст предоставлен
+        # рекламодателем"
+        advertiser_text = (
+            has_advertiser_text(cells[6], logger) if len(cells) > 6 else False
+        )
+
         task = {
             "task_id": task_id,
             "domain": domain,
@@ -1357,6 +1399,7 @@ def parse_task_row(row: WebElement, logger: logging.Logger) -> Optional[Dict[str
             "title": title,
             "time_passed": time_passed,
             "price": price,
+            "advertiser_text": advertiser_text,
         }
 
         logger.debug(f"Parsed task {task_id}: {title[:50]}...")
@@ -3004,6 +3047,24 @@ def process_new_article_orders(
     for task in new_tasks:
         title = (task.get("title") or "").strip()
         if title != ORDER_TASK_TITLE:
+            continue
+
+        # Бесплатные задания (в т.ч. на снятие ссылки) приходят с типом
+        # "Статья", но платить за генерацию текста по ним незачем.
+        price = task.get("price") or Decimal("0")
+        if price <= 0:
+            logger.info(
+                "Task %s is free (price=%s), article order skipped",
+                task["task_id"],
+                price,
+            )
+            continue
+
+        if task.get("advertiser_text"):
+            logger.info(
+                "Task %s comes with advertiser text, article order skipped",
+                task["task_id"],
+            )
             continue
 
         parsed = parse_anchor(task.get("description"))

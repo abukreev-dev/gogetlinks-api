@@ -10,6 +10,7 @@ from unittest.mock import Mock, patch, MagicMock
 from selenium.common.exceptions import TimeoutException, WebDriverException
 
 from gogetlinks_parser import (
+    has_advertiser_text,
     parse_price,
     extract_task_id,
     parse_task_row,
@@ -100,6 +101,71 @@ class TestTaskRowParser:
 
         task = parse_task_row(row, logger)
         assert task is None
+
+
+class TestAdvertiserText:
+    """Признак «Текст предоставлен рекламодателем» в ячейке действий."""
+
+    @staticmethod
+    def _tooltip(head="", body=""):
+        el = Mock()
+        el.get_attribute.side_effect = lambda name: {
+            "data-tooltip-head": head,
+            "data-tooltip-body": body,
+        }.get(name)
+        return el
+
+    def _cell(self, *tooltips):
+        cell = Mock()
+        cell.find_elements.return_value = list(tooltips)
+        return cell
+
+    def test_detected_by_tooltip_head(self, logger):
+        cell = self._cell(
+            self._tooltip(body="Написать первое сообщение"),
+            self._tooltip(
+                head="Текст предоставлен рекламодателем",
+                body="Готовый текст по заданию предоставлен рекламодателем.",
+            ),
+        )
+
+        assert has_advertiser_text(cell, logger) is True
+
+    def test_absent_on_regular_task(self, logger):
+        cell = self._cell(
+            self._tooltip(body="Написать первое сообщение"),
+            self._tooltip(body="Отклонить"),
+            self._tooltip(body="Выполнено"),
+        )
+
+        assert has_advertiser_text(cell, logger) is False
+
+    def test_delete_link_task_is_not_advertiser_text(self, logger):
+        """Тултип задания на снятие ссылки не должен считаться признаком."""
+        cell = self._cell(
+            self._tooltip(
+                head="Задание на удаление ссылки",
+                body="Задание на удаление ссылки отменить нельзя.",
+            )
+        )
+
+        assert has_advertiser_text(cell, logger) is False
+
+    def test_no_tooltips(self, logger):
+        assert has_advertiser_text(self._cell(), logger) is False
+
+    def test_lookup_failure_is_not_fatal(self, logger):
+        cell = Mock()
+        cell.find_elements.side_effect = WebDriverException("boom")
+
+        assert has_advertiser_text(cell, logger) is False
+
+    def test_parse_task_row_sets_flag(self, sample_task_row, logger):
+        """Строка без седьмой ячейки — признака нет."""
+        task = parse_task_row(sample_task_row, logger)
+
+        assert task is not None
+        assert task["advertiser_text"] is False
 
 
 class TestTaskDetailsParser:

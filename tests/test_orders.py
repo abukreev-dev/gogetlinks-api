@@ -253,6 +253,63 @@ def test_process_new_article_orders_only_articles(
     assert insert.call_args[0][1]["task_id"] == article_task["task_id"]
 
 
+def test_process_new_article_orders_skips_free_tasks(
+    conn, logger, telegram_config, article_task
+):
+    """Бесплатное задание (в т.ч. на снятие ссылки) статьёй не обслуживаем."""
+    free = dict(article_task, price=0)
+
+    with patch("gogetlinks_parser.insert_article_order") as insert, patch(
+        "gogetlinks_parser.send_order_telegram_message"
+    ) as send:
+        created = process_new_article_orders(conn, [free], telegram_config, logger)
+
+    assert created == 0
+    insert.assert_not_called()
+    send.assert_not_called()
+
+
+def test_process_new_article_orders_skips_tasks_without_price(
+    conn, logger, telegram_config, article_task
+):
+    no_price = dict(article_task)
+    no_price.pop("price")
+
+    with patch("gogetlinks_parser.insert_article_order") as insert:
+        created = process_new_article_orders(conn, [no_price], telegram_config, logger)
+
+    assert created == 0
+    insert.assert_not_called()
+
+
+def test_process_new_article_orders_skips_advertiser_text(
+    conn, logger, telegram_config, article_task
+):
+    """Текст по заданию уже дал рекламодатель — свой не заказываем."""
+    provided = dict(article_task, advertiser_text=True)
+
+    with patch("gogetlinks_parser.insert_article_order") as insert, patch(
+        "gogetlinks_parser.send_order_telegram_message"
+    ) as send:
+        created = process_new_article_orders(conn, [provided], telegram_config, logger)
+
+    assert created == 0
+    insert.assert_not_called()
+    send.assert_not_called()
+
+
+def test_process_new_article_orders_takes_paid_task_without_advertiser_text(
+    conn, logger, telegram_config, article_task
+):
+    paid = dict(article_task, advertiser_text=False)
+
+    with patch("gogetlinks_parser.insert_article_order", return_value=True) as insert:
+        created = process_new_article_orders(conn, [paid], telegram_config, logger)
+
+    assert created == 1
+    assert insert.call_count == 1
+
+
 def test_process_new_article_orders_anchor_failed_notifies(
     conn, logger, telegram_config, article_task
 ):
