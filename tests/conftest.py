@@ -71,5 +71,9 @@ def sample_task_row():
     cells[4].text = "2 часа назад"  # time_passed
     cells[5].text = "$50.00"  # price
 
-    row.find_elements.return_value = cells
+    # Ячейки отдаём только на поиск td: has_advertiser_text() ищет по строке
+    # своим CSS-селектором и не должен получить те же моки.
+    row.find_elements.side_effect = lambda by, value: (
+        cells if value == "td" else []
+    )
     return row

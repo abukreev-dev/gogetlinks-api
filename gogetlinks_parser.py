@@ -136,6 +136,8 @@ ORDER_TASK_TITLE = "Статья"
 # Задание, по которому готовый текст уже дал рекламодатель: в строке списка
 # стоит иконка-подсказка, своего текста такому заданию не нужно.
 ADVERTISER_TEXT_MARKER = "предоставлен рекламодателем"
+# Та же иконка — ссылка на готовый текст: `/copyright/getResultText/taskId/<id>`.
+ADVERTISER_TEXT_LINK = "/copyright/getresulttext/"
 ORDER_MARKER_ANCHOR = "[Анкор]"
 ORDER_STUCK_ATTEMPTS = 3
 # How long an order must sit untouched before "заказ не выходит" is sent.
@@ -1283,29 +1285,36 @@ def sanitize_text(text: str) -> str:
     return text.strip()
 
 
-def has_advertiser_text(actions_cell: WebElement, logger: logging.Logger) -> bool:
+def has_advertiser_text(row: WebElement, logger: logging.Logger) -> bool:
     """Check if the task comes with a ready text from the advertiser.
 
-    The only marker on the list page is a tooltip icon in the actions cell
-    ("Текст предоставлен рекламодателем"), so the tooltip text is matched
-    rather than a CSS class, which the site changes more often.
+    The marker exists only on the list page: an icon in the actions cell that
+    links to the prepared text and carries the tooltip "Текст предоставлен
+    рекламодателем". Both the link and the tooltip are matched (the CSS class
+    `icon-page icon_blue` is not — the site renames classes more often).
 
     Args:
-        actions_cell: Last cell of the task row
+        row: Task row element
         logger: Logger instance
 
     Returns:
-        True if the advertiser tooltip is present.
+        True if the advertiser-text icon is present.
     """
     try:
-        tooltips = actions_cell.find_elements(
-            By.CSS_SELECTOR, "[data-tooltip-head], [data-tooltip-body]"
+        candidates = row.find_elements(
+            By.CSS_SELECTOR,
+            f"a[href*='{ADVERTISER_TEXT_LINK}' i], "
+            "[data-tooltip-head], [data-tooltip-body]",
         )
     except Exception as e:
-        logger.debug(f"Failed to read action tooltips: {e}")
+        logger.debug(f"Failed to read advertiser-text markers: {e}")
         return False
 
-    for el in tooltips:
+    for el in candidates:
+        href = (el.get_attribute("href") or "").lower()
+        if ADVERTISER_TEXT_LINK in href:
+            return True
+
         parts = (
             el.get_attribute("data-tooltip-head") or "",
             el.get_attribute("data-tooltip-body") or "",
@@ -1384,11 +1393,8 @@ def parse_task_row(row: WebElement, logger: logging.Logger) -> Optional[Dict[str
         logger.debug(f"Task {task_id} price_text raw: {repr(price_text)}")
         price = parse_price(price_text)
 
-        # Cell 6: actions — tooltip icons, including "Текст предоставлен
-        # рекламодателем"
-        advertiser_text = (
-            has_advertiser_text(cells[6], logger) if len(cells) > 6 else False
-        )
+        # Готовый текст от рекламодателя — иконка в ячейке действий
+        advertiser_text = has_advertiser_text(row, logger)
 
         task = {
             "task_id": task_id,

@@ -104,64 +104,81 @@ class TestTaskRowParser:
 
 
 class TestAdvertiserText:
-    """Признак «Текст предоставлен рекламодателем» в ячейке действий."""
+    """Признак «Текст предоставлен рекламодателем» в строке списка."""
 
     @staticmethod
-    def _tooltip(head="", body=""):
+    def _el(href="", head="", body=""):
         el = Mock()
         el.get_attribute.side_effect = lambda name: {
+            "href": href,
             "data-tooltip-head": head,
             "data-tooltip-body": body,
         }.get(name)
         return el
 
-    def _cell(self, *tooltips):
-        cell = Mock()
-        cell.find_elements.return_value = list(tooltips)
-        return cell
+    def _row(self, *elements):
+        row = Mock()
+        row.find_elements.return_value = list(elements)
+        return row
 
-    def test_detected_by_tooltip_head(self, logger):
-        cell = self._cell(
-            self._tooltip(body="Написать первое сообщение"),
-            self._tooltip(
-                head="Текст предоставлен рекламодателем",
-                body="Готовый текст по заданию предоставлен рекламодателем.",
+    def test_real_markup_from_live_row(self, logger):
+        """Фрагмент живой строки (задача 25435811, ameno.ru, 10.10.2026)."""
+        link = self._el(
+            href="https://gogetlinks.net/copyright/getResultText/taskId/25435811"
+        )
+        icon = self._el(
+            head="Текст предоставлен рекламодателем",
+            body=(
+                "<p>Готовый текст по заданию предоставлен рекламодателем.</p>"
+                "<p>Разместите его на своем сайте и сдайте задание.</p>"
             ),
         )
 
-        assert has_advertiser_text(cell, logger) is True
+        assert has_advertiser_text(self._row(link, icon), logger) is True
+
+    def test_detected_by_link_alone(self, logger):
+        """Тултип могут переписать — ссылка на готовый текст остаётся."""
+        link = self._el(href="/copyright/getResultText/taskId/25435811")
+
+        assert has_advertiser_text(self._row(link), logger) is True
+
+    def test_detected_by_tooltip_alone(self, logger):
+        """Ссылку могут перевесить на JS — остаётся текст подсказки."""
+        icon = self._el(head="Текст предоставлен рекламодателем")
+
+        assert has_advertiser_text(self._row(icon), logger) is True
 
     def test_absent_on_regular_task(self, logger):
-        cell = self._cell(
-            self._tooltip(body="Написать первое сообщение"),
-            self._tooltip(body="Отклонить"),
-            self._tooltip(body="Выполнено"),
+        row = self._row(
+            self._el(body="Написать первое сообщение"),
+            self._el(href="/webTaskAction/beforeDelete/curr_id/25427679", body="Отклонить"),
+            self._el(href="#", body="Выполнено"),
         )
 
-        assert has_advertiser_text(cell, logger) is False
+        assert has_advertiser_text(row, logger) is False
 
     def test_delete_link_task_is_not_advertiser_text(self, logger):
         """Тултип задания на снятие ссылки не должен считаться признаком."""
-        cell = self._cell(
-            self._tooltip(
+        row = self._row(
+            self._el(
                 head="Задание на удаление ссылки",
                 body="Задание на удаление ссылки отменить нельзя.",
             )
         )
 
-        assert has_advertiser_text(cell, logger) is False
+        assert has_advertiser_text(row, logger) is False
 
-    def test_no_tooltips(self, logger):
-        assert has_advertiser_text(self._cell(), logger) is False
+    def test_no_markers(self, logger):
+        assert has_advertiser_text(self._row(), logger) is False
 
     def test_lookup_failure_is_not_fatal(self, logger):
-        cell = Mock()
-        cell.find_elements.side_effect = WebDriverException("boom")
+        row = Mock()
+        row.find_elements.side_effect = WebDriverException("boom")
 
-        assert has_advertiser_text(cell, logger) is False
+        assert has_advertiser_text(row, logger) is False
 
     def test_parse_task_row_sets_flag(self, sample_task_row, logger):
-        """Строка без седьмой ячейки — признака нет."""
+        """Обычная строка — признака нет."""
         task = parse_task_row(sample_task_row, logger)
 
         assert task is not None
