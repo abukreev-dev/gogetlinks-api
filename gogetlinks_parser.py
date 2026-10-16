@@ -138,6 +138,10 @@ ORDER_TASK_TITLE = "Статья"
 ADVERTISER_TEXT_MARKER = "предоставлен рекламодателем"
 # Та же иконка — ссылка на готовый текст: `/copyright/getResultText/taskId/<id>`.
 ADVERTISER_TEXT_LINK = "/copyright/getresulttext/"
+# Задание, возвращённое оптимизатором на доработку: в ячейке «Времени прошло»
+# стоит иконка-подсказка `data-tooltip-head="Задание на доработку"`.
+# Правки выполняются вручную, статью по такому заданию не заказываем.
+REWORK_MARKER = "на доработку"
 ORDER_MARKER_ANCHOR = "[Анкор]"
 ORDER_STUCK_ATTEMPTS = 3
 # How long an order must sit untouched before "заказ не выходит" is sent.
@@ -1325,11 +1329,45 @@ def has_advertiser_text(row: WebElement, logger: logging.Logger) -> bool:
     return False
 
 
+def has_rework_marker(row: WebElement, logger: logging.Logger) -> bool:
+    """Check if the task was sent back by the optimizer for rework.
+
+    The marker exists only on the list page: a red clock icon in the
+    "Времени прошло" cell with the tooltip "Задание на доработку". Only the
+    tooltip text is matched (the CSS class `icon_red tooltipster` is not — the
+    site renames classes more often).
+
+    Args:
+        row: Task row element
+        logger: Logger instance
+
+    Returns:
+        True if the rework tooltip is present.
+    """
+    try:
+        candidates = row.find_elements(
+            By.CSS_SELECTOR, "[data-tooltip-head], [data-tooltip-body]"
+        )
+    except Exception as e:
+        logger.debug(f"Failed to read rework markers: {e}")
+        return False
+
+    for el in candidates:
+        parts = (
+            el.get_attribute("data-tooltip-head") or "",
+            el.get_attribute("data-tooltip-body") or "",
+        )
+        if REWORK_MARKER in " ".join(parts).lower():
+            return True
+
+    return False
+
+
 def parse_task_row(row: WebElement, logger: logging.Logger) -> Optional[Dict[str, Any]]:
     """Extract all fields from task row.
 
     Fields: task_id, title, domain, customer, customer_url,
-            external_links, time_passed, price, advertiser_text
+            external_links, time_passed, price, advertiser_text, rework
 
     Args:
         row: Selenium WebElement for task row
@@ -1396,6 +1434,9 @@ def parse_task_row(row: WebElement, logger: logging.Logger) -> Optional[Dict[str
         # Готовый текст от рекламодателя — иконка в ячейке действий
         advertiser_text = has_advertiser_text(row, logger)
 
+        # Возврат оптимизатором на доработку — иконка в ячейке «Времени прошло»
+        rework = has_rework_marker(row, logger)
+
         task = {
             "task_id": task_id,
             "domain": domain,
@@ -1406,6 +1447,7 @@ def parse_task_row(row: WebElement, logger: logging.Logger) -> Optional[Dict[str
             "time_passed": time_passed,
             "price": price,
             "advertiser_text": advertiser_text,
+            "rework": rework,
         }
 
         logger.debug(f"Parsed task {task_id}: {title[:50]}...")
@@ -3066,6 +3108,14 @@ def process_new_article_orders(
             )
             continue
 
+        # Доработка: правки по комментарию оптимизатора делаются вручную,
+        # новую статью по такому заданию не заказываем (в чат оно попадает).
+        if task.get("rework"):
+            logger.info(
+                "Task %s is a rework, article order skipped", task["task_id"]
+            )
+            continue
+
         if task.get("advertiser_text"):
             logger.info(
                 "Task %s comes with advertiser text, article order skipped",
@@ -3425,6 +3475,8 @@ def format_telegram_message(
         customer = html.escape(task.get("customer", "—"))
 
         task_line = f"• {title} | {price_str} | {domain} → {customer}"
+        if task.get("rework"):
+            task_line += " | 🔁 <b>на доработку</b> (вручную)"
         lines.append(task_line)
 
     lines.append("")

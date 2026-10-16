@@ -298,6 +298,22 @@ def test_process_new_article_orders_skips_advertiser_text(
     send.assert_not_called()
 
 
+def test_process_new_article_orders_skips_rework(
+    conn, logger, telegram_config, article_task
+):
+    """Задание на доработку — правки вручную, статью не заказываем."""
+    rework = dict(article_task, rework=True)
+
+    with patch("gogetlinks_parser.insert_article_order") as insert, patch(
+        "gogetlinks_parser.send_order_telegram_message"
+    ) as send:
+        created = process_new_article_orders(conn, [rework], telegram_config, logger)
+
+    assert created == 0
+    insert.assert_not_called()
+    send.assert_not_called()
+
+
 def test_process_new_article_orders_takes_paid_task_without_advertiser_text(
     conn, logger, telegram_config, article_task
 ):

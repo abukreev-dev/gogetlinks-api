@@ -11,6 +11,7 @@ from selenium.common.exceptions import TimeoutException, WebDriverException
 
 from gogetlinks_parser import (
     has_advertiser_text,
+    has_rework_marker,
     parse_price,
     extract_task_id,
     parse_task_row,
@@ -183,6 +184,70 @@ class TestAdvertiserText:
 
         assert task is not None
         assert task["advertiser_text"] is False
+
+
+class TestReworkMarker:
+    """Признак «Задание на доработку» в строке списка."""
+
+    @staticmethod
+    def _el(head="", body=""):
+        el = Mock()
+        el.get_attribute.side_effect = lambda name: {
+            "data-tooltip-head": head,
+            "data-tooltip-body": body,
+        }.get(name)
+        return el
+
+    def _row(self, *elements):
+        row = Mock()
+        row.find_elements.return_value = list(elements)
+        return row
+
+    def test_real_markup_from_live_row(self, logger):
+        """Фрагмент живой строки (задача 25445983, berlindom.ru, 16.10.2026)."""
+        icon = self._el(
+            head="Задание на доработку",
+            body=(
+                "Это задание выполнено вами, но отправлено назад на "
+                "доработку. Прочтите комментарий оптимизатора в описании "
+                "задания, он выделен красным шрифтом."
+            ),
+        )
+
+        assert has_rework_marker(self._row(icon), logger) is True
+
+    def test_detected_by_body_alone(self, logger):
+        """Заголовок подсказки могут переписать — текст остаётся."""
+        icon = self._el(body="Задание отправлено назад на доработку.")
+
+        assert has_rework_marker(self._row(icon), logger) is True
+
+    def test_absent_on_regular_task(self, logger):
+        row = self._row(
+            self._el(body="Написать первое сообщение"),
+            self._el(
+                head="Текст предоставлен рекламодателем",
+                body="Готовый текст по заданию предоставлен рекламодателем.",
+            ),
+        )
+
+        assert has_rework_marker(row, logger) is False
+
+    def test_no_markers(self, logger):
+        assert has_rework_marker(self._row(), logger) is False
+
+    def test_lookup_failure_is_not_fatal(self, logger):
+        row = Mock()
+        row.find_elements.side_effect = WebDriverException("boom")
+
+        assert has_rework_marker(row, logger) is False
+
+    def test_parse_task_row_sets_flag(self, sample_task_row, logger):
+        """Обычная строка — признака нет."""
+        task = parse_task_row(sample_task_row, logger)
+
+        assert task is not None
+        assert task["rework"] is False
 
 
 class TestTaskDetailsParser:

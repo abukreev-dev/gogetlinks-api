@@ -154,6 +154,38 @@ class TestTelegramMessage:
         assert "(1)" in message
         assert "Single Task" in message
 
+    def test_format_message_marks_rework(self):
+        """Задание на доработку помечается в чате как ручное."""
+        tasks = [
+            {
+                "task_id": 1,
+                "title": "Статья",
+                "domain": "berlindom.ru",
+                "customer": "tia-horeca.ru",
+                "price": Decimal("500.00"),
+                "rework": True,
+            }
+        ]
+
+        message = format_telegram_message(tasks)
+
+        assert "на доработку" in message
+        assert "вручную" in message
+
+    def test_format_message_regular_task_has_no_rework_mark(self):
+        tasks = [
+            {
+                "task_id": 1,
+                "title": "Статья",
+                "domain": "berlindom.ru",
+                "customer": "tia-horeca.ru",
+                "price": Decimal("500.00"),
+                "rework": False,
+            }
+        ]
+
+        assert "доработку" not in format_telegram_message(tasks)
+
     def test_format_status_changes_message(self):
         changes = [
             {
