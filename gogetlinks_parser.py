@@ -3477,6 +3477,8 @@ def format_telegram_message(
         task_line = f"• {title} | {price_str} | {domain} → {customer}"
         if task.get("rework"):
             task_line += " | 🔁 <b>на доработку</b> (вручную)"
+        if task.get("advertiser_text"):
+            task_line += " | 📄 <b>статья предоставлена заказчиком</b> (не пишем)"
         lines.append(task_line)
 
     lines.append("")

@@ -186,6 +186,38 @@ class TestTelegramMessage:
 
         assert "доработку" not in format_telegram_message(tasks)
 
+    def test_format_message_marks_advertiser_text(self):
+        """Готовый текст от заказчика — статью по заданию не пишем."""
+        tasks = [
+            {
+                "task_id": 1,
+                "title": "Статья",
+                "domain": "ameno.ru",
+                "customer": "tia-horeca.ru",
+                "price": Decimal("500.00"),
+                "advertiser_text": True,
+            }
+        ]
+
+        message = format_telegram_message(tasks)
+
+        assert "статья предоставлена заказчиком" in message
+        assert "не пишем" in message
+
+    def test_format_message_regular_task_has_no_advertiser_mark(self):
+        tasks = [
+            {
+                "task_id": 1,
+                "title": "Статья",
+                "domain": "ameno.ru",
+                "customer": "tia-horeca.ru",
+                "price": Decimal("500.00"),
+                "advertiser_text": False,
+            }
+        ]
+
+        assert "заказчиком" not in format_telegram_message(tasks)
+
     def test_format_status_changes_message(self):
         changes = [
             {
