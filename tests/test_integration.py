@@ -218,6 +218,42 @@ class TestTelegramMessage:
 
         assert "заказчиком" not in format_telegram_message(tasks)
 
+    def test_format_message_marks_article_in_progress(self):
+        """Платная «Статья» без оговорок — текст заказан, его ждут."""
+        tasks = [
+            {
+                "task_id": 1,
+                "title": "Статья",
+                "domain": "fin61.ru",
+                "customer": "client.ru",
+                "price": Decimal("500.00"),
+            }
+        ]
+
+        message = format_telegram_message(tasks)
+
+        assert "статья пишется" in message
+        assert "ждать" in message
+
+    def test_format_message_no_in_progress_mark_when_order_skipped(self):
+        """Пометки «пишется» нет там, где заказ не создаётся."""
+        base = {
+            "task_id": 1,
+            "title": "Статья",
+            "domain": "fin61.ru",
+            "customer": "client.ru",
+            "price": Decimal("500.00"),
+        }
+        skipped = [
+            dict(base, price=Decimal("0.00")),
+            dict(base, rework=True),
+            dict(base, advertiser_text=True),
+            dict(base, title="Заметка"),
+        ]
+
+        for task in skipped:
+            assert "пишется" not in format_telegram_message([task]), task
+
     def test_format_status_changes_message(self):
         changes = [
             {

@@ -3073,6 +3073,38 @@ def send_order_telegram_message(
         return False
 
 
+def article_order_skip_reason(task: Dict[str, Any]) -> Optional[str]:
+    """Tell whether an article order must NOT be created for the task.
+
+    One place for the rule, used both when orders are created and when the
+    Telegram notification is built — so the chat never promises a text that
+    will not be ordered.
+
+    Args:
+        task: Parsed task dictionary
+
+    Returns:
+        Short reason (Russian, for logs) or None when the article is ordered.
+    """
+    if (task.get("title") or "").strip() != ORDER_TASK_TITLE:
+        return "не «Статья»"
+
+    # Бесплатные задания (в т.ч. на снятие ссылки) приходят с типом "Статья",
+    # но платить за генерацию текста по ним незачем.
+    price = task.get("price") or Decimal("0")
+    if price <= 0:
+        return "бесплатное задание"
+
+    # Доработка: правки по комментарию оптимизатора делаются вручную.
+    if task.get("rework"):
+        return "задание на доработку"
+
+    if task.get("advertiser_text"):
+        return "текст предоставлен рекламодателем"
+
+    return None
+
+
 def process_new_article_orders(
     conn: MySQLConnection,
     new_tasks: List[Dict[str, Any]],
@@ -3093,33 +3125,13 @@ def process_new_article_orders(
     created = 0
 
     for task in new_tasks:
-        title = (task.get("title") or "").strip()
-        if title != ORDER_TASK_TITLE:
-            continue
-
-        # Бесплатные задания (в т.ч. на снятие ссылки) приходят с типом
-        # "Статья", но платить за генерацию текста по ним незачем.
-        price = task.get("price") or Decimal("0")
-        if price <= 0:
+        reason = article_order_skip_reason(task)
+        if reason is not None:
+            # Чужой тип задания — обычное дело, в лог не пишем.
+            if (task.get("title") or "").strip() != ORDER_TASK_TITLE:
+                continue
             logger.info(
-                "Task %s is free (price=%s), article order skipped",
-                task["task_id"],
-                price,
-            )
-            continue
-
-        # Доработка: правки по комментарию оптимизатора делаются вручную,
-        # новую статью по такому заданию не заказываем (в чат оно попадает).
-        if task.get("rework"):
-            logger.info(
-                "Task %s is a rework, article order skipped", task["task_id"]
-            )
-            continue
-
-        if task.get("advertiser_text"):
-            logger.info(
-                "Task %s comes with advertiser text, article order skipped",
-                task["task_id"],
+                "Task %s: article order skipped (%s)", task["task_id"], reason
             )
             continue
 
@@ -3479,6 +3491,8 @@ def format_telegram_message(
             task_line += " | 🔁 <b>на доработку</b> (вручную)"
         if task.get("advertiser_text"):
             task_line += " | 📄 <b>статья предоставлена заказчиком</b> (не пишем)"
+        if article_order_skip_reason(task) is None:
+            task_line += " | ✍️ <b>статья пишется</b> (ждать)"
         lines.append(task_line)
 
     lines.append("")
