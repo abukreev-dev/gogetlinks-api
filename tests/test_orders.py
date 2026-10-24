@@ -240,17 +240,31 @@ def test_insert_article_order_db_error(conn, logger, article_task):
 def test_process_new_article_orders_only_articles(
     conn, logger, telegram_config, article_task
 ):
-    note_task = dict(article_task, task_id=1, title="Заметка")
     context_task = dict(article_task, task_id=2, title="Контекстная ссылка")
 
     with patch("gogetlinks_parser.insert_article_order", return_value=True) as insert:
         created = process_new_article_orders(
-            conn, [article_task, note_task, context_task], telegram_config, logger
+            conn, [article_task, context_task], telegram_config, logger
         )
 
     assert created == 1
     assert insert.call_count == 1
     assert insert.call_args[0][1]["task_id"] == article_task["task_id"]
+
+
+def test_process_new_article_orders_takes_notes(
+    conn, logger, telegram_config, article_task
+):
+    """«Заметка» заказывается так же, как «Статья»."""
+    note_task = dict(article_task, task_id=1, title="Заметка")
+
+    with patch("gogetlinks_parser.insert_article_order", return_value=True) as insert:
+        created = process_new_article_orders(
+            conn, [note_task], telegram_config, logger
+        )
+
+    assert created == 1
+    assert insert.call_args[0][1]["task_id"] == 1
 
 
 def test_process_new_article_orders_skips_free_tasks(

@@ -131,8 +131,9 @@ DETAIL_REQUEST_DELAY = 1.5
 # Stale tasks alert
 NO_NEW_TASKS_THRESHOLD_DAYS = 5
 
-# Article orders (ddl.ggl_article_order): only "Статья" tasks are taken.
-ORDER_TASK_TITLE = "Статья"
+# Article orders (ddl.ggl_article_order): "Статья" and "Заметка" tasks are taken
+# (для нас заметка ничем не отличается от статьи).
+ORDER_TASK_TITLES = ("Статья", "Заметка")
 # Задание, по которому готовый текст уже дал рекламодатель: в строке списка
 # стоит иконка-подсказка, своего текста такому заданию не нужно.
 ADVERTISER_TEXT_MARKER = "предоставлен рекламодателем"
@@ -3086,8 +3087,8 @@ def article_order_skip_reason(task: Dict[str, Any]) -> Optional[str]:
     Returns:
         Short reason (Russian, for logs) or None when the article is ordered.
     """
-    if (task.get("title") or "").strip() != ORDER_TASK_TITLE:
-        return "не «Статья»"
+    if (task.get("title") or "").strip() not in ORDER_TASK_TITLES:
+        return "не «Статья» и не «Заметка»"
 
     # Бесплатные задания (в т.ч. на снятие ссылки) приходят с типом "Статья",
     # но платить за генерацию текста по ним незачем.
@@ -3128,7 +3129,7 @@ def process_new_article_orders(
         reason = article_order_skip_reason(task)
         if reason is not None:
             # Чужой тип задания — обычное дело, в лог не пишем.
-            if (task.get("title") or "").strip() != ORDER_TASK_TITLE:
+            if (task.get("title") or "").strip() not in ORDER_TASK_TITLES:
                 continue
             logger.info(
                 "Task %s: article order skipped (%s)", task["task_id"], reason
