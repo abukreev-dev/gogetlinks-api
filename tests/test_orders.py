@@ -240,11 +240,11 @@ def test_insert_article_order_db_error(conn, logger, article_task):
 def test_process_new_article_orders_only_articles(
     conn, logger, telegram_config, article_task
 ):
-    context_task = dict(article_task, task_id=2, title="Контекстная ссылка")
+    image_task = dict(article_task, task_id=2, title="Ссылка-картинка")
 
     with patch("gogetlinks_parser.insert_article_order", return_value=True) as insert:
         created = process_new_article_orders(
-            conn, [article_task, context_task], telegram_config, logger
+            conn, [article_task, image_task], telegram_config, logger
         )
 
     assert created == 1
@@ -265,6 +265,21 @@ def test_process_new_article_orders_takes_notes(
 
     assert created == 1
     assert insert.call_args[0][1]["task_id"] == 1
+
+
+def test_process_new_article_orders_takes_context_links(
+    conn, logger, telegram_config, article_task
+):
+    """«Контекстная ссылка» заказывается как обычная статья."""
+    context_task = dict(article_task, task_id=2, title="Контекстная ссылка")
+
+    with patch("gogetlinks_parser.insert_article_order", return_value=True) as insert:
+        created = process_new_article_orders(
+            conn, [context_task], telegram_config, logger
+        )
+
+    assert created == 1
+    assert insert.call_args[0][1]["task_id"] == 2
 
 
 def test_process_new_article_orders_skips_free_tasks(

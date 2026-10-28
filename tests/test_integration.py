@@ -248,7 +248,7 @@ class TestTelegramMessage:
             dict(base, price=Decimal("0.00")),
             dict(base, rework=True),
             dict(base, advertiser_text=True),
-            dict(base, title="Контекстная ссылка"),
+            dict(base, title="Ссылка-картинка"),
         ]
 
         for task in skipped:
