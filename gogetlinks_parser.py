@@ -3882,8 +3882,8 @@ def apply_experiment_prices(
 def prices_report(conn: MySQLConnection, logger: logging.Logger) -> None:
     """--prices-report: sales, revenue, costs and profit per group.
 
-    "После" — from the first applied_at till now, "до" — the same number of
-    days right before it. Costs: ARTICLE_COST per ORDER_TASK_TITLES task.
+    Period: from the first applied_at till now. Costs: ARTICLE_COST per
+    ORDER_TASK_TITLES task.
     """
     cursor = conn.cursor(dictionary=True)
     try:
@@ -3896,7 +3896,6 @@ def prices_report(conn: MySQLConnection, logger: logging.Logger) -> None:
             print("Цены ещё не применены (--prices-apply --confirm)")
             return
         started, now = period["started"], period["now"]
-        before_start = started - (now - started)
 
         cursor.execute(
             f"SELECT grp, COUNT(*) AS domains FROM {DB_FULL_PRICE_EXPERIMENT_TABLE} "
@@ -3906,22 +3905,22 @@ def prices_report(conn: MySQLConnection, logger: logging.Logger) -> None:
 
         title_placeholders = ", ".join(["%s"] * len(ORDER_TASK_TITLES))
         cursor.execute(
-            f"""SELECT e.grp, t.created_at >= %s AS after_start,
+            f"""SELECT e.grp,
                        COUNT(t.id) AS sales,
                        COALESCE(SUM(t.price), 0) AS revenue,
                        COALESCE(SUM(t.title IN ({title_placeholders})), 0) AS articles
                 FROM {DB_FULL_PRICE_EXPERIMENT_TABLE} e
                 JOIN {DB_FULL_TABLE} t
-                    ON t.domain = e.host
+                    -- collation колонок разная (unicode_ci и 0900_ai_ci),
+                    -- без COLLATE MySQL отказывается их сравнивать.
+                    ON t.domain = e.host COLLATE utf8mb4_unicode_ci
                     AND t.price > 0
                     AND t.created_at >= %s
-                GROUP BY e.grp, after_start
+                GROUP BY e.grp
             """,
-            (started, *ORDER_TASK_TITLES, before_start),
+            (*ORDER_TASK_TITLES, started),
         )
-        stats: Dict[Tuple[str, int], Any] = {
-            (row["grp"], int(row["after_start"])): row for row in cursor.fetchall()
-        }
+        stats: Dict[str, Any] = {row["grp"]: row for row in cursor.fetchall()}
     except mysql.connector.Error as e:
         logger.error("Failed to build price report: %s", e)
         return
@@ -3929,25 +3928,20 @@ def prices_report(conn: MySQLConnection, logger: logging.Logger) -> None:
         cursor.close()
 
     days = (now - started).days
+    print(f"Эксперимент с {started:%d.%m.%Y}, дней: {days}.")
     print(
-        f"Эксперимент с {started:%d.%m.%Y}, дней: {days}. "
-        f"Сравнение с {before_start:%d.%m.%Y}–{started:%d.%m.%Y}."
-    )
-    print(
-        f"{'Группа':<9} {'Доменов':>7} | {'Период':<6} {'Продаж':>6} "
+        f"{'Группа':<9} {'Доменов':>7} {'Продаж':>6} "
         f"{'Выручка':>9} {'Затраты':>8} {'Прибыль':>9}"
     )
     for group, count in domains.items():
-        for after, label in ((0, "до"), (1, "после")):
-            row = stats.get((group, after))
-            sales = int(row["sales"]) if row else 0
-            revenue = Decimal(row["revenue"]) if row else Decimal("0")
-            costs = ARTICLE_COST * (int(row["articles"]) if row else 0)
-            head = f"{group:<9} {count:>7}" if after == 0 else " " * 17
-            print(
-                f"{head} | {label:<6} {sales:>6} {revenue:>9.0f} "
-                f"{costs:>8.0f} {revenue - costs:>9.0f}"
-            )
+        row = stats.get(group)
+        sales = int(row["sales"]) if row else 0
+        revenue = Decimal(row["revenue"]) if row else Decimal("0")
+        costs = ARTICLE_COST * (int(row["articles"]) if row else 0)
+        print(
+            f"{group:<9} {count:>7} {sales:>6} {revenue:>9.0f} "
+            f"{costs:>8.0f} {revenue - costs:>9.0f}"
+        )
 
 
 # =============================================================================

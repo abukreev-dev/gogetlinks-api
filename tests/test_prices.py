@@ -1,6 +1,7 @@
 """Tests for the site price experiment (trust-9 domains, /mySites site card)."""
 
 from argparse import Namespace
+from datetime import datetime
 from decimal import Decimal
 from unittest.mock import Mock, patch
 
@@ -17,6 +18,7 @@ from gogetlinks_parser import (
     parse_cli_args,
     parse_site_row,
     price_problems,
+    prices_report,
     split_price_groups,
 )
 
@@ -195,6 +197,32 @@ def test_assign_inserts_every_domain(conn, logger):
     assert len(inserts) == 4
     assert DB_FULL_PRICE_EXPERIMENT_TABLE in inserts[0][0][0]
     conn.commit.assert_called_once()
+
+
+# =============================================================================
+# prices_report
+# =============================================================================
+
+
+def test_report_only_after_start(conn, logger, capsys):
+    started = datetime(2026, 10, 28, 12, 16)
+    conn.dict_cursor.fetchone.return_value = {
+        "started": started,
+        "now": datetime(2026, 11, 28, 12, 0),
+    }
+    conn.dict_cursor.fetchall.side_effect = [
+        [{"grp": "450", "domains": 14}, {"grp": "500", "domains": 15}],
+        [{"grp": "500", "sales": 3, "revenue": Decimal("1500"), "articles": 3}],
+    ]
+
+    prices_report(conn, logger)
+
+    sql, params = conn.dict_cursor.execute.call_args_list[-1][0]
+    assert "COLLATE" in sql
+    assert params[-1] == started
+    out = capsys.readouterr().out
+    assert "до" not in out.split()
+    assert "500" in out and "1140" in out  # 1500 - 3 * 120
 
 
 # =============================================================================
