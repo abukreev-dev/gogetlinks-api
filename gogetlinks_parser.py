@@ -64,6 +64,9 @@ TASK_LIST_URL = "https://gogetlinks.net/webTask/index"
 TASK_DETAIL_URL = "https://gogetlinks.net/template/view_task.php?curr_id={}"
 MY_SITES_URL = "https://gogetlinks.net/mySites"
 MY_SITES_CHANGE_COUNT_URL = "https://gogetlinks.net/mySites/changeCountInPage"
+# Карточка сайта («Настроить» в первом столбце /mySites): форма с ценами.
+EDIT_SITE_PATH = "/editSiteInfo/index/site_id/{}"
+EDIT_SITE_URL = HOME_URL + EDIT_SITE_PATH
 
 # Links export URLs
 PAID_LINKS_URL = "https://gogetlinks.net/webTask/index/action/viewPaid"
@@ -88,6 +91,10 @@ DB_LINKS_TABLE = "ggl_links"
 DB_FULL_LINKS_TABLE = f"{DB_SCHEMA}.{DB_LINKS_TABLE}"
 DB_ORDERS_TABLE = "ggl_article_order"
 DB_FULL_ORDERS_TABLE = f"{DB_SCHEMA}.{DB_ORDERS_TABLE}"
+DB_PRICE_EXPERIMENT_TABLE = "ggl_price_experiment"
+DB_FULL_PRICE_EXPERIMENT_TABLE = f"{DB_SCHEMA}.{DB_PRICE_EXPERIMENT_TABLE}"
+DB_SITE_PRICES_TABLE = "ggl_site_prices"
+DB_FULL_SITE_PRICES_TABLE = f"{DB_SCHEMA}.{DB_SITE_PRICES_TABLE}"
 
 # Timeouts
 CAPTCHA_TIMEOUT = 120
@@ -188,6 +195,24 @@ METRIC_ORDER = [
 
 # Known values of the "Ссылочность" column.
 REFERENCING_LABELS = ("Низкая", "Оптимальная", "Повышенная", "Высокая")
+
+# Эксперимент с ценами: домены с трастом 9. Свои сайты (target = 'site') —
+# контроль, цены не трогаем, только проверяем, что не ниже 900. Остальные
+# делим на группы с одной ценой на статью, заметку и контекстную ссылку.
+PRICE_EXPERIMENT_TRUST = 9
+PRICE_CONTROL_TARGET = "site"
+PRICE_CONTROL_GROUP = "control"
+PRICE_CONTROL_MIN = Decimal("900")
+PRICE_EXPERIMENT_GROUPS = (500, 450, 400)
+# Группы выравниваем по продажам за этот период до эксперимента.
+PRICE_BALANCE_DAYS = 90
+# Поля карточки сайта: суффикс id (#price_<key>, #not_price_<key>) → тип.
+PRICE_FIELDS = {"paper": "Статья", "post": "Заметка", "link": "Контекстная ссылка"}
+SELECTOR_SITE_CARD_SUBMIT = ".js-siteCard__submit"
+SELECTOR_SITE_CARD_ERROR = ".js-siteCard__error"
+SITE_CARD_SAVE_TIMEOUT = 20
+# Затраты на текст по заданию «Статья»/«Заметка».
+ARTICLE_COST = Decimal("120")
 
 # Session persistence
 COOKIE_FILE = "session_cookies.pkl"
@@ -1824,6 +1849,18 @@ def parse_site_row(
     if not site:
         return None
 
+    # site_id нужен для карточки сайта, он есть только в ссылке «Настроить».
+    site_id = None
+    try:
+        settings_link = cells[0].find_element(
+            By.CSS_SELECTOR, "a[href*='/editSiteInfo/index/site_id/']"
+        )
+        match = re.search(r"/site_id/(\d+)", settings_link.get_attribute("href") or "")
+        if match:
+            site_id = int(match.group(1))
+    except NoSuchElementException:
+        pass
+
     status = sanitize_text(cells[1].text)
     sqi = extract_digits_only(sanitize_text(cells[2].text))
     cf_tf = extract_digits_only(sanitize_text(cells[3].text))
@@ -1839,6 +1876,7 @@ def parse_site_row(
 
     return {
         "site": site.lower(),
+        "site_id": site_id,
         "status": status,
         "sqi": sqi,
         "cf_tf": cf_tf,
@@ -3384,6 +3422,535 @@ def cancel_order(
 
 
 # =============================================================================
+# PRICE EXPERIMENT
+# =============================================================================
+
+
+def split_price_groups(domains: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Split experiment domains into the control and price groups.
+
+    Domains with target 'site' form the control group. The rest are sorted
+    by past sales and dealt "snake" style (A B C C B A ...), so every price
+    group gets a comparable share of strong and weak domains.
+
+    Args:
+        domains: Dicts with host, target, sales, revenue, traffic
+
+    Returns:
+        The same dicts extended with `group` and `target_price`
+    """
+    assignment = [
+        {**domain, "group": PRICE_CONTROL_GROUP, "target_price": None}
+        for domain in domains
+        if domain["target"] == PRICE_CONTROL_TARGET
+    ]
+    rest = sorted(
+        (domain for domain in domains if domain["target"] != PRICE_CONTROL_TARGET),
+        key=lambda d: (-d["sales"], -d["revenue"], -d["traffic"], d["host"]),
+    )
+
+    group_count = len(PRICE_EXPERIMENT_GROUPS)
+    for index, domain in enumerate(rest):
+        lap, position = divmod(index, group_count)
+        slot = position if lap % 2 == 0 else group_count - 1 - position
+        price = PRICE_EXPERIMENT_GROUPS[slot]
+        assignment.append({**domain, "group": str(price), "target_price": price})
+
+    return assignment
+
+
+def assign_price_groups(
+    conn: MySQLConnection, logger: logging.Logger
+) -> Optional[List[Dict[str, Any]]]:
+    """Pick trust-9 domains and store their experiment groups.
+
+    Runs once: if the experiment table already has rows, nothing changes.
+
+    Returns:
+        Stored assignment, empty list if groups already exist, None on DB error
+    """
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute(f"SELECT COUNT(*) AS cnt FROM {DB_FULL_PRICE_EXPERIMENT_TABLE}")
+        existing: Any = cursor.fetchone()
+        if existing["cnt"] > 0:
+            logger.warning(
+                "Price groups already assigned (%s domains), nothing to do",
+                existing["cnt"],
+            )
+            return []
+
+        cursor.execute(
+            f"""SELECT d.host, d.target,
+                       COALESCE(d.ggl_traffic, 0) AS traffic,
+                       COUNT(t.id) AS sales,
+                       COALESCE(SUM(t.price), 0) AS revenue
+                FROM {DB_SCHEMA}.domain d
+                LEFT JOIN {DB_FULL_TABLE} t
+                    ON t.domain = d.host
+                    AND t.price > 0
+                    AND t.created_at >= NOW() - INTERVAL %s DAY
+                WHERE d.ggl_trust = %s
+                    AND d.deleted_at IS NULL
+                    AND COALESCE(d.is_sold, 0) = 0
+                GROUP BY d.host, d.target, d.ggl_traffic
+            """,
+            (PRICE_BALANCE_DAYS, PRICE_EXPERIMENT_TRUST),
+        )
+        domains: List[Any] = cursor.fetchall()
+        if not domains:
+            logger.warning("No domains with trust %s", PRICE_EXPERIMENT_TRUST)
+            return []
+
+        assignment = split_price_groups(domains)
+        for row in assignment:
+            cursor.execute(
+                f"""INSERT INTO {DB_FULL_PRICE_EXPERIMENT_TABLE}
+                    (host, grp, target_price, sales_before, revenue_before,
+                     traffic, assigned_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, NOW())
+                """,
+                (
+                    row["host"],
+                    row["group"],
+                    row["target_price"],
+                    row["sales"],
+                    row["revenue"],
+                    row["traffic"],
+                ),
+            )
+        conn.commit()
+        logger.info("Price groups assigned for %s domains", len(assignment))
+        return assignment
+
+    except mysql.connector.Error as e:
+        logger.error("Failed to assign price groups: %s", e)
+        conn.rollback()
+        return None
+    finally:
+        cursor.close()
+
+
+def format_price_groups(assignment: List[Dict[str, Any]]) -> str:
+    """Render group assignment with per-group sales totals."""
+    lines = []
+    groups: Dict[str, List[Dict[str, Any]]] = {}
+    for row in assignment:
+        groups.setdefault(row["group"], []).append(row)
+
+    for group, rows in groups.items():
+        sales = sum(int(r["sales"]) for r in rows)
+        revenue = sum(Decimal(r["revenue"]) for r in rows)
+        lines.append(
+            f"[{group}] доменов: {len(rows)}, продаж за {PRICE_BALANCE_DAYS} дн.: "
+            f"{sales}, выручка: {revenue:.0f} ₽"
+        )
+        for r in rows:
+            lines.append(
+                f"    {r['host']:<30} продаж {int(r['sales']):>3}, "
+                f"трафик {int(r['traffic'])}"
+            )
+    return "\n".join(lines)
+
+
+def load_price_experiment(
+    conn: MySQLConnection, logger: logging.Logger
+) -> List[Dict[str, Any]]:
+    """Return experiment rows ordered by group and host."""
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute(
+            f"""SELECT host, site_id, grp, target_price, applied_at
+                FROM {DB_FULL_PRICE_EXPERIMENT_TABLE}
+                ORDER BY grp, host
+            """
+        )
+        rows: List[Any] = cursor.fetchall()
+        return rows
+    except mysql.connector.Error as e:
+        logger.error("Failed to load price experiment: %s", e)
+        return []
+    finally:
+        cursor.close()
+
+
+def resolve_site_ids(
+    driver: webdriver.Chrome,
+    conn: MySQLConnection,
+    experiment: List[Dict[str, Any]],
+    logger: logging.Logger,
+) -> None:
+    """Fill `site_id` of experiment rows from /mySites and persist it."""
+    site_ids = {
+        site["site"]: site.get("site_id") for site in parse_my_sites(driver, logger)
+    }
+
+    cursor = conn.cursor()
+    try:
+        for row in experiment:
+            site_id = site_ids.get(row["host"])
+            if site_id is None:
+                logger.warning("No site_id on /mySites for %s", row["host"])
+                continue
+            if site_id != row["site_id"]:
+                cursor.execute(
+                    f"UPDATE {DB_FULL_PRICE_EXPERIMENT_TABLE} "
+                    "SET site_id = %s WHERE host = %s",
+                    (site_id, row["host"]),
+                )
+            row["site_id"] = site_id
+        conn.commit()
+    except mysql.connector.Error as e:
+        logger.error("Failed to save site_id: %s", e)
+        conn.rollback()
+    finally:
+        cursor.close()
+
+
+def read_site_prices(
+    driver: webdriver.Chrome, site_id: int, logger: logging.Logger
+) -> Optional[Dict[str, Any]]:
+    """Read article/note/context prices from the site card.
+
+    Returns:
+        {"paper": Decimal, "not_paper": bool, ...} or None on failure
+    """
+    if not navigate_with_retry(driver, EDIT_SITE_URL.format(site_id), logger):
+        return None
+
+    try:
+        WebDriverWait(driver, PAGE_LOAD_TIMEOUT).until(
+            EC.presence_of_element_located((By.ID, "price_paper"))
+        )
+        prices: Dict[str, Any] = {}
+        for key in PRICE_FIELDS:
+            value = driver.find_element(By.ID, f"price_{key}").get_attribute("value")
+            prices[key] = parse_price(value or "")
+            prices[f"not_{key}"] = driver.find_element(
+                By.ID, f"not_price_{key}"
+            ).is_selected()
+        return prices
+
+    except (TimeoutException, NoSuchElementException) as e:
+        logger.error("Failed to read prices of site %s: %s", site_id, type(e).__name__)
+        return None
+
+
+def save_site_prices(
+    conn: MySQLConnection,
+    host: str,
+    site_id: int,
+    prices: Dict[str, Any],
+    logger: logging.Logger,
+) -> None:
+    """Store a price snapshot (history of reads)."""
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            f"""INSERT INTO {DB_FULL_SITE_PRICES_TABLE}
+                (host, site_id, price_paper, price_post, price_link,
+                 not_paper, not_post, not_link, read_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
+            """,
+            (
+                host,
+                site_id,
+                prices["paper"],
+                prices["post"],
+                prices["link"],
+                int(prices["not_paper"]),
+                int(prices["not_post"]),
+                int(prices["not_link"]),
+            ),
+        )
+        conn.commit()
+    except mysql.connector.Error as e:
+        logger.error("Failed to save prices of %s: %s", host, e)
+        conn.rollback()
+    finally:
+        cursor.close()
+
+
+def price_problems(row: Dict[str, Any], prices: Dict[str, Any]) -> List[str]:
+    """List price fields that break the experiment rule for this domain.
+
+    Control: every offered type must cost at least PRICE_CONTROL_MIN.
+    Price group: all three fields must equal the group price.
+    """
+    problems = []
+    for key, label in PRICE_FIELDS.items():
+        price = prices[key]
+        if row["target_price"] is None:
+            if not prices[f"not_{key}"] and price < PRICE_CONTROL_MIN:
+                problems.append(f"{label} {price:.0f} ₽")
+        elif price != Decimal(row["target_price"]):
+            problems.append(f"{label} {price:.0f} ₽ (нужно {row['target_price']})")
+    return problems
+
+
+def format_site_prices(row: Dict[str, Any], prices: Dict[str, Any]) -> str:
+    """One line: host, group and the three prices ("выкл" = не размещаю)."""
+    parts = []
+    for key in PRICE_FIELDS:
+        value = f"{prices[key]:.0f}"
+        if prices[f"not_{key}"]:
+            value += " (выкл)"
+        parts.append(value)
+    return f"{row['host']:<30} [{row['grp']}] статья/заметка/контекст: " + " / ".join(
+        parts
+    )
+
+
+def read_experiment_prices(
+    driver: webdriver.Chrome, conn: MySQLConnection, logger: logging.Logger
+) -> None:
+    """--prices-read: read and store prices of every experiment domain."""
+    experiment = load_price_experiment(conn, logger)
+    if not experiment:
+        logger.warning("Price experiment is empty, run --prices-assign first")
+        return
+
+    resolve_site_ids(driver, conn, experiment, logger)
+
+    lines = []
+    problems = []
+    for row in experiment:
+        if row["site_id"] is None:
+            lines.append(f"{row['host']:<30} [{row['grp']}] нет на /mySites")
+            continue
+
+        prices = read_site_prices(driver, row["site_id"], logger)
+        time.sleep(DETAIL_REQUEST_DELAY)
+        if prices is None:
+            lines.append(f"{row['host']:<30} [{row['grp']}] не прочитать карточку")
+            continue
+
+        save_site_prices(conn, row["host"], row["site_id"], prices, logger)
+        lines.append(format_site_prices(row, prices))
+        for problem in price_problems(row, prices):
+            problems.append(f"{row['host']} [{row['grp']}]: {problem}")
+
+    print("\n".join(lines))
+    if problems:
+        print("\nНе по правилам эксперимента:")
+        print("\n".join(problems))
+    logger.info(
+        "Prices read for %s domains, problems: %s", len(experiment), len(problems)
+    )
+
+
+def apply_site_price(
+    driver: webdriver.Chrome, site_id: int, price: int, logger: logging.Logger
+) -> bool:
+    """Set one price to all PRICE_FIELDS in the site card and save it.
+
+    The card is opened from /mySites the same way the "Настроить" link does,
+    so the site's own script sends every other field unchanged.
+
+    Returns:
+        True if the card closed after saving (GGL accepted the form)
+    """
+    try:
+        driver.execute_script("$('.jquery-modal').remove(); $('.modal').remove();")
+        driver.execute_script(
+            "$('<a>', {href: arguments[0], rel: 'modal:open'})"
+            ".appendTo('body')[0].click();",
+            EDIT_SITE_PATH.format(site_id),
+        )
+        WebDriverWait(driver, PAGE_LOAD_TIMEOUT).until(
+            EC.visibility_of_element_located(
+                (By.CSS_SELECTOR, SELECTOR_SITE_CARD_SUBMIT)
+            )
+        )
+
+        driver.execute_script(
+            "var price = arguments[0];"
+            "arguments[1].forEach(function (key) {"
+            "  $('#price_' + key).val(price).trigger('change');"
+            "});"
+            "$(arguments[2]).click();",
+            str(price),
+            list(PRICE_FIELDS),
+            SELECTOR_SITE_CARD_SUBMIT,
+        )
+
+        # Успех: скрипт GGL закрывает окно. Ошибка: текст в поле ошибок.
+        WebDriverWait(driver, SITE_CARD_SAVE_TIMEOUT).until(
+            lambda d: not any(
+                e.is_displayed()
+                for e in d.find_elements(By.CSS_SELECTOR, SELECTOR_SITE_CARD_SUBMIT)
+            )
+            or any(
+                e.text.strip()
+                for e in d.find_elements(By.CSS_SELECTOR, SELECTOR_SITE_CARD_ERROR)
+            )
+        )
+        errors = [
+            sanitize_text(e.text)
+            for e in driver.find_elements(By.CSS_SELECTOR, SELECTOR_SITE_CARD_ERROR)
+            if e.text.strip()
+        ]
+        if errors:
+            logger.error(
+                "GGL rejected prices of site %s: %s", site_id, "; ".join(errors)
+            )
+            return False
+        return True
+
+    except (TimeoutException, WebDriverException) as e:
+        logger.error("Failed to save prices of site %s: %s", site_id, type(e).__name__)
+        return False
+
+
+def apply_experiment_prices(
+    driver: webdriver.Chrome,
+    conn: MySQLConnection,
+    logger: logging.Logger,
+    confirm: bool,
+) -> None:
+    """--prices-apply: set group prices; without --confirm only show the plan."""
+    experiment = load_price_experiment(conn, logger)
+    if not experiment:
+        logger.warning("Price experiment is empty, run --prices-assign first")
+        return
+
+    resolve_site_ids(driver, conn, experiment, logger)
+
+    plan = []
+    for row in experiment:
+        if row["target_price"] is None or row["site_id"] is None:
+            continue
+        prices = read_site_prices(driver, row["site_id"], logger)
+        time.sleep(DETAIL_REQUEST_DELAY)
+        if prices is None:
+            print(f"{row['host']:<30} не прочитать карточку, пропускаю")
+            continue
+        if not price_problems(row, prices):
+            print(f"{row['host']:<30} уже {row['target_price']} ₽")
+            continue
+        print(f"{format_site_prices(row, prices)} → {row['target_price']}")
+        plan.append(row)
+
+    if not plan:
+        print("Менять нечего")
+        return
+    if not confirm:
+        print(f"\nК изменению: {len(plan)}. Это пробный прогон, для записи: --confirm")
+        return
+
+    if not navigate_with_retry(driver, MY_SITES_URL, logger):
+        return
+
+    saved = []
+    for row in plan:
+        if apply_site_price(driver, row["site_id"], row["target_price"], logger):
+            saved.append(row)
+        time.sleep(DETAIL_REQUEST_DELAY)
+
+    # Сверка: перечитываем карточку, applied_at ставим только подтверждённым.
+    verified = 0
+    cursor = conn.cursor()
+    try:
+        for row in saved:
+            prices = read_site_prices(driver, row["site_id"], logger)
+            time.sleep(DETAIL_REQUEST_DELAY)
+            if prices is None:
+                print(f"{row['host']:<30} сохранено, но не прочитать для сверки")
+                continue
+            save_site_prices(conn, row["host"], row["site_id"], prices, logger)
+            problems = price_problems(row, prices)
+            if problems:
+                print(f"{row['host']:<30} не совпало: {'; '.join(problems)}")
+                continue
+            cursor.execute(
+                f"UPDATE {DB_FULL_PRICE_EXPERIMENT_TABLE} "
+                "SET applied_at = COALESCE(applied_at, NOW()) WHERE host = %s",
+                (row["host"],),
+            )
+            verified += 1
+        conn.commit()
+    except mysql.connector.Error as e:
+        logger.error("Failed to mark applied prices: %s", e)
+        conn.rollback()
+    finally:
+        cursor.close()
+
+    print(f"\nПрименено и проверено: {verified} из {len(plan)}")
+    logger.info("Prices applied: planned=%s verified=%s", len(plan), verified)
+
+
+def prices_report(conn: MySQLConnection, logger: logging.Logger) -> None:
+    """--prices-report: sales, revenue, costs and profit per group.
+
+    "После" — from the first applied_at till now, "до" — the same number of
+    days right before it. Costs: ARTICLE_COST per "Статья"/"Заметка" task.
+    """
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute(
+            f"SELECT MIN(applied_at) AS started, NOW() AS now "
+            f"FROM {DB_FULL_PRICE_EXPERIMENT_TABLE}"
+        )
+        period: Any = cursor.fetchone()
+        if period["started"] is None:
+            print("Цены ещё не применены (--prices-apply --confirm)")
+            return
+        started, now = period["started"], period["now"]
+        before_start = started - (now - started)
+
+        cursor.execute(
+            f"SELECT grp, COUNT(*) AS domains FROM {DB_FULL_PRICE_EXPERIMENT_TABLE} "
+            "GROUP BY grp ORDER BY grp"
+        )
+        domains = {row["grp"]: row["domains"] for row in cursor.fetchall()}
+
+        title_placeholders = ", ".join(["%s"] * len(ORDER_TASK_TITLES))
+        cursor.execute(
+            f"""SELECT e.grp, t.created_at >= %s AS after_start,
+                       COUNT(t.id) AS sales,
+                       COALESCE(SUM(t.price), 0) AS revenue,
+                       COALESCE(SUM(t.title IN ({title_placeholders})), 0) AS articles
+                FROM {DB_FULL_PRICE_EXPERIMENT_TABLE} e
+                JOIN {DB_FULL_TABLE} t
+                    ON t.domain = e.host
+                    AND t.price > 0
+                    AND t.created_at >= %s
+                GROUP BY e.grp, after_start
+            """,
+            (started, *ORDER_TASK_TITLES, before_start),
+        )
+        stats: Dict[Tuple[str, int], Any] = {
+            (row["grp"], int(row["after_start"])): row for row in cursor.fetchall()
+        }
+    except mysql.connector.Error as e:
+        logger.error("Failed to build price report: %s", e)
+        return
+    finally:
+        cursor.close()
+
+    days = (now - started).days
+    print(
+        f"Эксперимент с {started:%d.%m.%Y}, дней: {days}. "
+        f"Сравнение с {before_start:%d.%m.%Y}–{started:%d.%m.%Y}."
+    )
+    print(
+        f"{'Группа':<9} {'Доменов':>7} | {'Период':<6} {'Продаж':>6} "
+        f"{'Выручка':>9} {'Затраты':>8} {'Прибыль':>9}"
+    )
+    for group, count in domains.items():
+        for after, label in ((0, "до"), (1, "после")):
+            row = stats.get((group, after))
+            sales = int(row["sales"]) if row else 0
+            revenue = Decimal(row["revenue"]) if row else Decimal("0")
+            costs = ARTICLE_COST * (int(row["articles"]) if row else 0)
+            head = f"{group:<9} {count:>7}" if after == 0 else " " * 17
+            print(
+                f"{head} | {label:<6} {sales:>6} {revenue:>9.0f} "
+                f"{costs:>8.0f} {revenue - costs:>9.0f}"
+            )
+
+
+# =============================================================================
 # OUTPUT
 # =============================================================================
 
@@ -3894,6 +4461,31 @@ def parse_cli_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
             "(no Selenium, implies --skip-tasks --skip-sites)"
         ),
     )
+    parser.add_argument(
+        "--prices-assign",
+        action="store_true",
+        help="Price experiment: split trust-9 domains into groups (once)",
+    )
+    parser.add_argument(
+        "--prices-read",
+        action="store_true",
+        help="Price experiment: read site card prices into ggl_site_prices",
+    )
+    parser.add_argument(
+        "--prices-apply",
+        action="store_true",
+        help="Price experiment: show price changes (write only with --confirm)",
+    )
+    parser.add_argument(
+        "--confirm",
+        action="store_true",
+        help="With --prices-apply: really save prices on gogetlinks",
+    )
+    parser.add_argument(
+        "--prices-report",
+        action="store_true",
+        help="Price experiment: sales/revenue/costs per group, before vs after",
+    )
     return parser.parse_args(argv)
 
 
@@ -3918,12 +4510,19 @@ def main(argv: Optional[List[str]] = None) -> int:
         # drag the heavy Selenium stages along.
         orders_only = needs_orders or cancel_order_task_id is not None
 
-        needs_tasks = not args.skip_tasks and not orders_only
-        needs_sites = not args.skip_sites and not orders_only
+        # Price experiment runs only on demand, never with the regular stages.
+        prices_selenium = args.prices_read or args.prices_apply
+        prices_only = prices_selenium or args.prices_assign or args.prices_report
+        standalone = orders_only or prices_only
+
+        needs_tasks = not args.skip_tasks and not standalone
+        needs_sites = not args.skip_sites and not standalone
         needs_sync_links = args.sync_links
         needs_check_links = args.check_links
         needs_warm_links = args.warm_links
-        needs_selenium = needs_tasks or needs_sites or needs_sync_links
+        needs_selenium = (
+            needs_tasks or needs_sites or needs_sync_links or prices_selenium
+        )
 
         if (
             not needs_tasks
@@ -3931,7 +4530,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             and not needs_sync_links
             and not needs_check_links
             and not needs_warm_links
-            and not orders_only
+            and not standalone
         ):
             logger = setup_logger()
             logger.warning("Nothing to do (all stages skipped)")
@@ -3960,7 +4559,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         )
 
         # Acquire mySites lock only for runs that include /mySites stage.
-        if needs_sites:
+        if needs_sites or prices_selenium:
             sites_lock_acquired, lock_reason = acquire_sites_lock(logger)
             if not sites_lock_acquired:
                 logger.warning(
@@ -3990,6 +4589,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         if needs_orders:
             logger.info("Processing article orders (--orders)")
             process_orders(conn, config, logger)
+
+        if args.prices_assign:
+            logger.info("Assigning price groups (--prices-assign)")
+            assignment = assign_price_groups(conn, logger)
+            if assignment is None:
+                return EXIT_DATABASE_ERROR
+            if assignment:
+                print(format_price_groups(assignment))
+
+        if args.prices_report:
+            prices_report(conn, logger)
 
         # --warm-links / --check-links: no Selenium needed, just DB + HTTP
         if needs_warm_links:
@@ -4072,6 +4682,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         if not auth_ok:
             logger.error("Authentication failed")
             return EXIT_AUTH_FAILED
+
+        if args.prices_read:
+            logger.info("Reading site prices (--prices-read)")
+            read_experiment_prices(driver, conn, logger)
+
+        if args.prices_apply:
+            logger.info("Applying site prices (--prices-apply)")
+            apply_experiment_prices(driver, conn, logger, confirm=args.confirm)
 
         # Sync paid links (--sync-links)
         if needs_sync_links:

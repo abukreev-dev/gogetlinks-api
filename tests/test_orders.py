@@ -707,6 +707,11 @@ def _order_args(**overrides):
         warm_links=False,
         orders=False,
         cancel_order=None,
+        prices_assign=False,
+        prices_read=False,
+        prices_apply=False,
+        confirm=False,
+        prices_report=False,
     )
     base.update(overrides)
     return Namespace(**base)

@@ -58,6 +58,36 @@ CREATE TABLE IF NOT EXISTS ddl.ggl_links (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
 COMMENT='Оплаченные ссылки с gogetlinks.net';
 
+-- Эксперимент с ценами: группа каждого домена (заполняет --prices-assign)
+CREATE TABLE IF NOT EXISTS ddl.ggl_price_experiment (
+    host VARCHAR(255) NOT NULL PRIMARY KEY COMMENT 'domain.host',
+    site_id INT DEFAULT NULL COMMENT 'site_id на gogetlinks (карточка сайта)',
+    grp VARCHAR(20) NOT NULL COMMENT 'control или цена группы',
+    target_price INT DEFAULT NULL COMMENT 'Цена статьи/заметки/контекста; NULL = контроль',
+    sales_before INT NOT NULL DEFAULT 0 COMMENT 'Продаж за 90 дней до эксперимента',
+    revenue_before DECIMAL(10,2) NOT NULL DEFAULT 0 COMMENT 'Выручка за 90 дней до',
+    traffic INT NOT NULL DEFAULT 0 COMMENT 'ggl_traffic на момент распределения',
+    assigned_at DATETIME NOT NULL,
+    applied_at DATETIME DEFAULT NULL COMMENT 'Когда цена выставлена и проверена'
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+COMMENT='Эксперимент с ценами площадок GGL';
+
+-- История прочитанных цен из карточки сайта (--prices-read, --prices-apply)
+CREATE TABLE IF NOT EXISTS ddl.ggl_site_prices (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    host VARCHAR(255) NOT NULL,
+    site_id INT NOT NULL,
+    price_paper DECIMAL(10,2) NOT NULL COMMENT 'Статья',
+    price_post DECIMAL(10,2) NOT NULL COMMENT 'Заметка',
+    price_link DECIMAL(10,2) NOT NULL COMMENT 'Контекстная ссылка',
+    not_paper TINYINT(1) NOT NULL DEFAULT 0 COMMENT '«не размещаю»',
+    not_post TINYINT(1) NOT NULL DEFAULT 0,
+    not_link TINYINT(1) NOT NULL DEFAULT 0,
+    read_at DATETIME NOT NULL,
+    KEY idx_host_read (host, read_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+COMMENT='Снимки цен площадок GGL';
+
 -- Создание пользователя для парсера (выполните отдельно с правами root)
 -- CREATE USER 'gogetlinks_parser'@'localhost' IDENTIFIED BY 'STRONG_PASSWORD_HERE';
 -- GRANT SELECT, INSERT, UPDATE, DELETE ON ddl.* TO 'gogetlinks_parser'@'localhost';
