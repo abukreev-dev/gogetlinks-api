@@ -3884,6 +3884,9 @@ def prices_report(conn: MySQLConnection, logger: logging.Logger) -> None:
 
     Period: from the first applied_at till now. Costs: ARTICLE_COST per
     ORDER_TASK_TITLES task.
+
+    Формат вывода зафиксирован владельцем (docs/TZ_price_experiment.md,
+    «Формат отчёта зафиксирован») — не менять без прямой просьбы.
     """
     cursor = conn.cursor(dictionary=True)
     try:
